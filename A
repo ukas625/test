@@ -1,3 +1,156 @@
+import pandas as pd
+import numpy as np
+import shap
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+# NEU: für's Speichern
+from joblib import dump
+from datetime import datetime
+
+# --- 1. DATENVORBEREITUNG (DEINE SAUBERE LOGIK) ---
+# Annahme: 'df_dummies' ist dein geladenes, finales DataFrame.
+print("Starte Random Forest Workflow...")
+
+# Definiere die eine Zielspalte
+target_column = 'merged_DICKENMESSUNG_Pen1'
+
+# y ist nur die Zielspalte
+df_y = df_dummies[target_column]
+# X ist ALLES ANDERE
+df_X = df_dummies.drop(columns=[target_column])
+
+# --- 2. CHRONOLOGISCHER TRAIN-TEST-SPLIT ---
+split_percentage = 0.8
+split_index = int(len(df_X) * split_percentage)
+
+X_train, X_test = df_X.iloc[:split_index], df_X.iloc[split_index:]
+y_train, y_test = df_y.iloc[:split_index], df_y.iloc[split_index:]
+
+print(f"Trainingsdaten: {len(X_train)} Zeilen, Testdaten: {len(X_test)} Zeilen")
+
+# --- 3. MODELL TRAINING ---
+print("\nTrainiere RandomForestRegressor...")
+model_rf = RandomForestRegressor(
+    n_estimators=100,
+    random_state=42,
+    n_jobs=-1,
+    min_samples_leaf=5
+)
+model_rf.fit(X_train, y_train)
+print("Training abgeschlossen!")
+
+# --- 4. DETAILLIERTE MODELL EVALUIERUNG --- 📊
+print("\n--- Detaillierte Modell Evaluierung ---")
+
+predictions_rf = model_rf.predict(X_test)
+
+# --- 4.1: Numerische Metriken ---
+print("\n[4.1] Numerische Metriken:")
+mae_rf = mean_absolute_error(y_test, predictions_rf)
+rmse_rf = np.sqrt(mean_squared_error(y_test, predictions_rf))
+r2_rf = r2_score(y_test, predictions_rf)
+
+# MAPE (Mean Absolute Percentage Error) - Vorsicht bei Nullen im Nenner
+y_test_no_zeros = y_test[y_test != 0]
+predictions_no_zeros = predictions_rf[y_test != 0]
+mape_rf = np.mean(np.abs((y_test_no_zeros - predictions_no_zeros) / y_test_no_zeros)) * 100
+
+print(f"   -> Mean Absolute Error (MAE): {mae_rf:.4f} (Einheiten)")
+print(f"   -> Root Mean Squared Error (RMSE): {rmse_rf:.4f} (Einheiten)")
+print(f"   -> R-Quadrat (R²) Score: {r2_rf:.4f} (Je näher an 1.0, desto besser)")
+print(f"   -> Mean Absolute Percentage Error (MAPE): {mape_rf:.2f} % (Durchschnittl. %-Fehler)")
+
+# --- 4.2: Visuelle Diagnose-Plots --- 📈
+print("\n[4.2] Erstelle Visuelle Diagnose-Plots...")
+
+fig, axes = plt.subplots(3, 1, figsize=(18, 20)) # 3 Plots untereinander
+
+# Plot 1: Zeitreihen-Vergleich
+axes[0].plot(y_test.values, label='Echte Werte', color='blue', alpha=0.7)
+axes[0].plot(predictions_rf, label='RF Vorhersage', color='orange', linestyle='--')
+axes[0].set_title('Plot 1: Vorhersage vs. Echte Werte (Zeitverlauf)', fontsize=16)
+axes[0].set_ylabel('Wert')
+axes[0].set_xlabel('Zeitpunkte im Test-Set')
+axes[0].legend()
+axes[0].grid(True)
+
+# Plot 2: Streudiagramm (Echte Werte vs. Vorhersage)
+axes[1].scatter(y_test, predictions_rf, alpha=0.5)
+perfect_line = np.linspace(min(y_test.min(), predictions_rf.min()), max(y_test.max(), predictions_rf.max()), 100)
+axes[1].plot(perfect_line, perfect_line, color='red', linestyle='--', label='Perfekte Vorhersage (x=y)')
+axes[1].set_title('Plot 2: Echte Werte vs. Vorhersage (Streudiagramm)', fontsize=16)
+axes[1].set_xlabel('Echte Werte')
+axes[1].set_ylabel('Vorhersage')
+axes[1].legend()
+axes[1].grid(True)
+
+# Plot 3: Residuen-Plot (Fehler über die Zeit)
+residuals = y_test - predictions_rf
+axes[2].plot(residuals.values, label='Residuen (Fehler)', linestyle='-', marker='.', markersize=2, alpha=0.6)
+axes[2].axhline(y=0, color='red', linestyle='--', label='Null-Fehler-Linie')
+axes[2].set_title('Plot 3: Residuen-Plot (Fehler über die Zeit)', fontsize=16)
+axes[2].set_xlabel('Zeitpunkte im Test-Set')
+axes[2].set_ylabel('Fehler (Echt - Vorhersage)')
+axes[2].legend()
+axes[2].grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# --- 4.3: SHAP Feature Importance --- 🧠
+print("\n[4.3] Berechne SHAP Feature Importance...")
+explainer_rf = shap.TreeExplainer(model_rf)
+X_test_sample = X_test.sample(n=min(1000, len(X_test)), random_state=42)
+shap_values_rf = explainer_rf.shap_values(X_test_sample)
+
+print("Erstelle SHAP Summary Plot...")
+shap.summary_plot(shap_values_rf, X_test_sample)
+
+# --- 5. SPEICHERN FÜR DAS DASHBOARD (NEU) ---
+MODEL_PATH = "rf_dashboard.joblib"
+
+bundle = {
+    "model": model_rf,
+    "feature_names": list(df_X.columns),   # für saubere Spaltenreihenfolge im Dashboard
+    "target_name": target_column,
+    "split_index": split_index,
+    "trained_at": datetime.now().isoformat(timespec="seconds"),
+    "metrics": {
+        "r2": float(r2_rf),
+        "mae": float(mae_rf),
+        "rmse": float(rmse_rf),
+        "mape_percent": float(mape_rf)
+    },
+    "random_state": 42
+}
+
+dump(bundle, MODEL_PATH, compress=3)
+print(f"\n✅ Modell-Bundle für Dashboard gespeichert unter: {MODEL_PATH}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # pages/01_Neues_Rezept.py
 # -------------------------------------------------------------
 # Dashboard-Seite: "Neue Rezepte / Arbeitsanweisungen"
