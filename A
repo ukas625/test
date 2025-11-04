@@ -1,0 +1,432 @@
+# pages/01_Neues_Rezept.py
+# -------------------------------------------------------------
+# Dashboard-Seite: "Neue Rezepte / Arbeitsanweisungen"
+# Ziel: Für eine gewünschte Dicke optimale Parameter-Kombination vorschlagen
+#       (unter AA-Grenzen) und vollständig ausgeben: Ist vs. KI-Empfehlung.
+# -------------------------------------------------------------
+import json
+from datetime import datetime
+import numpy as np
+import pandas as pd
+import streamlit as st
+from joblib import load
+from sklearn.utils.validation import check_is_fitted
+
+# =========================
+# Seitensetup & Styling
+# =========================
+st.set_page_config(page_title="Neue Rezepte / Arbeitsanweisungen", layout="wide")
+
+st.markdown("""
+<style>
+.reportview-container .main .block-container{padding-top:1.2rem; padding-bottom:2rem;}
+h1, h2, h3 { margin-bottom: .2rem; }
+hr { margin: .4rem 0 .8rem 0; }
+.small { font-size:.9rem; color:#666; }
+.ok { color:#0a8; font-weight:600; }
+.warn { color:#b80; font-weight:600; }
+.bad { color:#c00; font-weight:600; }
+div[data-testid="stMetricValue"] { font-variant-numeric: tabular-nums; }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("Neue Rezepte / Arbeitsanweisungen")
+st.caption("Ziel-Dicke vorgeben → KI berechnet optimale Parameterkombination innerhalb der AA-Grenzen.")
+
+# ========================================================
+# 1) Modell laden (Bundle aus dem Training)
+#    Erwartet Struktur:
+#    { model, feature_names, target_name, metrics, trained_at, ... }
+# ========================================================
+with st.expander("📦 Modell laden", expanded=True):
+    colM1, colM2 = st.columns([2,1])
+    with colM1:
+        default_model_path = "rf_dashboard.joblib"
+        model_path = st.text_input("Pfad zum Modell-Bundle (.joblib)", value=default_model_path)
+    with colM2:
+        reload_btn = st.button("Modell laden / neu laden", use_container_width=True)
+
+    @st.cache_resource(show_spinner=False, ttl=600)
+    def _load_bundle(path: str):
+        bundle = load(path)
+        model = bundle["model"]
+        try:
+            check_is_fitted(model)
+        except Exception as e:
+            raise RuntimeError(f"Modell scheint nicht trainiert/fitted: {e}")
+        feature_names = list(bundle["feature_names"])
+        target_name = bundle.get("target_name", "target")
+        metrics = bundle.get("metrics", {})
+        trained_at = bundle.get("trained_at", "n/a")
+        meta = {
+            "target_name": target_name,
+            "metrics": metrics,
+            "trained_at": trained_at,
+            "split_index": bundle.get("split_index", None),
+            "random_state": bundle.get("random_state", None),
+        }
+        return model, feature_names, meta
+
+    if reload_btn or "bundle_cache" not in st.session_state:
+        try:
+            st.session_state["bundle_cache"] = _load_bundle(model_path)
+            st.success(f"Modell geladen ✅  ({model_path})")
+        except Exception as e:
+            st.error(f"Konnte Modell-Bundle nicht laden: {e}")
+
+    if "bundle_cache" not in st.session_state:
+        st.stop()
+
+    model, feature_names, meta = st.session_state["bundle_cache"]
+    met = meta.get("metrics", {})
+    met_str = " | ".join([f"{k.upper()}: {v:.4f}" for k, v in met.items() if isinstance(v, (int,float))])
+    st.write(f"**Zielvariable:** `{meta['target_name']}`  •  **Trainiert am:** {meta['trained_at']}  •  **Metriken:** {met_str}")
+
+# ========================================================
+# 2) Kontext-Zeile hochladen/erzeugen
+#    -> Vollständiger Feature-Vektor (eine Zeile), der Material/Rezept/Schicht fixiert.
+# ========================================================
+with st.expander("🧩 Kontext definieren (Material/Setup/Ist-Zeile)", expanded=True):
+    st.markdown("""
+Die Optimierung braucht **eine vollständige Kontext-Zeile** (alle Feature-Spalten), z. B. aus historischen Daten.
+- **Upload**: CSV mit **genau 1 Zeile** und exakt denselben Spalten wie beim Training.
+- Alternativ: Eine **leere** Zeile mit Nullen erzeugen und manuell befüllen (nur zur Demo).
+""")
+    up = st.file_uploader("Kontext-CSV (eine Zeile, Spalten = feature_names)", type=["csv"])
+    if up is not None:
+        ctx_df = pd.read_csv(up)
+        if len(ctx_df) != 1:
+            st.error("Die CSV muss **genau 1 Zeile** haben.")
+            st.stop()
+        ctx = ctx_df.iloc[0].to_dict()
+    else:
+        # Fallback: Null-Kontext (nur als Notlösung)
+        ctx = {f: 0.0 for f in feature_names}
+        st.info("Kein Kontext hochgeladen – benutze Null-Kontext (nur Demo). Lade besser eine 1-Zeilen-CSV hoch.")
+
+    # Reindex auf Feature-Reihenfolge, fehlende Spalten -> 0.0
+    ctx_series = pd.Series(ctx, index=feature_names).fillna(0.0)
+    base_row = ctx_series.to_frame().T  # DataFrame (1, n)
+
+# ========================================================
+# 3) AA-Grenzen (min/max) bereitstellen + steuerbare Parameter wählen
+#    - Optional Upload: CSV mit Spalten ['feature','min','max']
+#    - Editierbare Tabelle (st.data_editor)
+# ========================================================
+with st.expander("🛡️ AA-Grenzen & Steuerbarkeit festlegen", expanded=True):
+    colA, colB = st.columns([1,1])
+    with colA:
+        lim_up = st.file_uploader("AA-Grenzen-CSV (Spalten: feature,min,max)", type=["csv"], key="limits_upl")
+    with colB:
+        st.markdown("**Tipps zur CSV „AA-Grenzen“**  \nBeispiel:")
+        st.code("feature,min,max\nTemp_Zone1,185,200\nDruck,75,90\nSpeed,28,40", language="csv")
+        st.markdown("Nicht aufgeführte Features können eingefroren bleiben.")
+
+    # Heuristik: Welche Features sind typischerweise steuerbar?
+    def guess_controllables(cols):
+        keys = ["temp", "temper", "druck", "pressure", "speed", "geschw", "zone", "set", "screw", "pump"]
+        return [c for c in cols if any(k in c.lower() for k in keys)]
+
+    if lim_up is not None:
+        lim_df = pd.read_csv(lim_up).dropna()
+        if not set(["feature","min","max"]).issubset(lim_df.columns):
+            st.error("Grenzen-CSV braucht Spalten: feature,min,max")
+            st.stop()
+        # nur Features behalten, die im Modell vorkommen
+        lim_df = lim_df[lim_df["feature"].isin(feature_names)].copy()
+    else:
+        # Ohne CSV: um Ist-Wert ±10% als weiche Default-Grenze
+        lim_df = pd.DataFrame({
+            "feature": feature_names,
+            "min": base_row.iloc[0].values * 0.9,
+            "max": base_row.iloc[0].values * 1.1
+        })
+
+    lim_df = lim_df.drop_duplicates(subset=["feature"])
+
+    # Steuerbare Features initial vorschlagen
+    default_ctrl = [f for f in lim_df["feature"].tolist()
+                    if f in guess_controllables(lim_df["feature"].tolist())]
+    ctrl_choice = st.multiselect(
+        "Steuerbare Parameter (werden optimiert)",
+        options=lim_df["feature"].tolist(),
+        default=default_ctrl,
+        help="Nur diese Features variiert die Optimierung."
+    )
+
+    # Merge zu vollständiger Editor-Tabelle (alle Modellfeatures sichtbar)
+    full_limits = pd.DataFrame({"feature": feature_names})
+    full_limits = full_limits.merge(lim_df, on="feature", how="left")
+    # Defaults falls leer
+    full_limits["min"] = full_limits["min"].fillna(base_row.iloc[0] * 0.9)
+    full_limits["max"] = full_limits["max"].fillna(base_row.iloc[0] * 1.1)
+    # Freeze-Flag
+    full_limits["freeze"] = ~full_limits["feature"].isin(ctrl_choice)
+
+    st.markdown("**Grenzen & Freeze bearbeiten** (Doppelklick für Edit):")
+    edited = st.data_editor(
+        full_limits[["feature", "min", "max", "freeze"]],
+        num_rows="fixed",
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # Validierung
+    if (edited["max"] < edited["min"]).any():
+        st.error("Mindestens bei einem Feature ist **max < min**. Bitte korrigieren.")
+        st.stop()
+
+    # Endgültige Steuerbarkeit + Bounds
+    controllables = edited.loc[~edited["freeze"], "feature"].tolist()
+    limits_map = {r["feature"]: (float(r["min"]), float(r["max"])) for _, r in edited.iterrows()}
+
+
+
+# ========================================================
+# 4) Ziel-Dicke + Optimierungs-Settings
+# ========================================================
+with st.expander("🎯 Ziel & Suche", expanded=True):
+    colZ1, colZ2, colZ3 = st.columns([1,1,1])
+    with colZ1:
+        target_value = st.number_input("Ziel-Dicke (mm)", value=1.40, step=0.01, format="%.2f")
+    with colZ2:
+        n_samples = st.slider("Exploration (Zufalls-Samples)", min_value=200, max_value=5000, value=1500, step=100,
+                              help="Größere Werte = gründlichere Suche, langsamer.")
+    with colZ3:
+        refine_steps = st.slider("Lokale Verfeinerung (Koordinaten-Suche, Runden)", min_value=0, max_value=6, value=3, step=1,
+                                 help="Feinabstimmung nach der Zufallssuche.")
+
+    loss_type = st.radio("Zielfunktion", options=["|Vorhersage − Ziel| (absolut)", "(Vorhersage − Ziel)² (quadratisch)"],
+                         index=0, horizontal=True)
+
+    def loss_fn(yhat, target):
+        if loss_type.startswith("|"):
+            return np.abs(yhat - target)
+        return (yhat - target)**2
+
+# ========================================================
+# 5) Hilfsfunktionen (Vorhersage & Optimierung)
+# ========================================================
+def _predict(model, Xdf: pd.DataFrame) -> np.ndarray:
+    # Sichere Spaltenreihenfolge
+    Xuse = Xdf.reindex(columns=feature_names, fill_value=0.0)
+    return model.predict(Xuse.values)
+
+def clip_to_bounds(x_series: pd.Series, bounds: dict) -> pd.Series:
+    x = x_series.copy()
+    for f, (mn, mx) in bounds.items():
+        if f in x.index:
+            x[f] = float(np.clip(x[f], mn, mx))
+    return x
+
+def random_search(base_row: pd.Series, controllables, bounds, n):
+    """Uniforme Stichprobe innerhalb Bounds nur über controllables, Rest = fix wie base_row."""
+    if len(controllables) == 0:
+        return base_row.to_frame().T  # nichts zu optimieren
+    samples = []
+    for _ in range(n):
+        s = base_row.copy()
+        for f in controllables:
+            mn, mx = bounds[f]
+            s[f] = np.random.uniform(mn, mx)
+        samples.append(s)
+    df = pd.DataFrame(samples)
+    return df.reindex(columns=feature_names)
+
+def coordinate_refine(x_best: pd.Series, controllables, bounds, model, target, iters=3, grid=7):
+    """Einfache Koordinaten-Suche: pro Feature ein lokales Raster um aktuellen Wert."""
+    if len(controllables) == 0 or iters == 0:
+        return x_best
+    x = x_best.copy()
+    for _ in range(iters):
+        improved = False
+        for f in controllables:
+            mn, mx = bounds[f]
+            grid_vals = np.linspace(mn, mx, grid)
+            cand = []
+            for v in grid_vals:
+                x_try = x.copy()
+                x_try[f] = float(v)
+                yhat = _predict(model, x_try.to_frame().T)[0]
+                cand.append((loss_fn(yhat, target), v))
+            cand.sort(key=lambda t: t[0])
+            best_loss, best_v = cand[0]
+            if best_v != x[f]:
+                x[f] = best_v
+                improved = True
+        if not improved:
+            break
+    return x
+
+def solve_inverse(base_row: pd.Series, controllables, bounds, model, target, n_samples=1500, refine_steps=3):
+    # 1) Zufallssuche
+    Xcand = random_search(base_row, controllables, bounds, n_samples)
+    yhat = _predict(model, Xcand)
+    losses = loss_fn(yhat, target)
+    topk = np.argsort(losses)[:max(10, len(Xcand)//20)]
+    Xtop = Xcand.iloc[topk].copy()
+
+    # 2) Lokale Verfeinerung ab Top-Kandidaten
+    best = None
+    best_loss = np.inf
+    for _, row in Xtop.iterrows():
+        x_ref = coordinate_refine(row, controllables, bounds, model, target, iters=refine_steps, grid=7)
+        y_ref = _predict(model, x_ref.to_frame().T)[0]
+        l = loss_fn(y_ref, target)
+        if l < best_loss:
+            best_loss = l
+            best = (x_ref, y_ref)
+
+    # Falls keine Kontrollen: einfach base_row prüfen
+    if best is None:
+        y0 = _predict(model, base_row.to_frame().T)[0]
+        best = (base_row, y0)
+        best_loss = loss_fn(y0, target)
+
+    x_star, y_star = best
+    x_star = clip_to_bounds(x_star, bounds)
+    return x_star, float(y_star), float(best_loss)
+
+def one_at_a_time_effects(model, base_row: pd.Series, x_star: pd.Series, features) -> dict:
+    """Ceteris-paribus: Änderungswirkung je Feature (mm)."""
+    base_pred = _predict(model, base_row.to_frame().T)[0]
+    effects = {}
+    for f in features:
+        x_tmp = base_row.copy()
+        x_tmp[f] = x_star[f]
+        eff = _predict(model, x_tmp.to_frame().T)[0] - base_pred
+        effects[f] = float(eff)
+    return effects
+
+# ========================================================
+# 6) Ausführen
+# ========================================================
+run_col1, run_col2, run_col3 = st.columns([1,1,2])
+with run_col1:
+    run = st.button("⚙️ Parameter berechnen", type="primary", use_container_width=True)
+with run_col2:
+    reset = st.button("Zurücksetzen", use_container_width=True)
+if reset:
+    try:
+        st.rerun()
+    except Exception:
+        st.experimental_rerun()
+
+if run:
+    if len(controllables) == 0:
+        st.warning("Es sind aktuell **keine steuerbaren Parameter** ausgewählt. Bitte mindestens einen wählen.")
+        st.stop()
+
+    # Bounds für alle Features (nicht gesetzte einfach auf Ist-Wert fixieren)
+    bounds = {}
+    for f in feature_names:
+        mn, mx = limits_map.get(f, (base_row.iloc[0][f], base_row.iloc[0][f]))
+        bounds[f] = (float(mn), float(mx))
+
+    with st.spinner("Suche optimale Parameterkombination..."):
+        x_star, y_star, best_loss = solve_inverse(
+            base_row.iloc[0], controllables, bounds, model, target_value,
+            n_samples=n_samples, refine_steps=refine_steps
+        )
+
+    # Tabellenaufbereitung „Ist vs. KI“
+    df_out = []
+    for f in feature_names:
+        ist = float(base_row.iloc[0][f])
+        ki  = float(x_star[f])
+        mn, mx = bounds[f]
+        row = {
+            "Parameter": f,
+            "Ist": ist,
+            "KI-Empfehlung": ki,
+            "Δ": ki - ist,
+            "Grenze (min)": mn,
+            "Grenze (max)": mx,
+            "Innerhalb Grenze?": (mn <= ki <= mx)
+        }
+        df_out.append(row)
+    df_out = pd.DataFrame(df_out)
+
+    # Ceteris-paribus Einflüsse nur für optimierte Features
+    effects = one_at_a_time_effects(model, base_row.iloc[0], x_star, controllables)
+    eff_df = pd.DataFrame([
+        {"Parameter": k, "Δ-Einfluss auf Dicke (mm)": v} for k, v in effects.items()
+    ]).sort_values("Δ-Einfluss auf Dicke (mm)", key=lambda s: s.abs(), ascending=False)
+
+    # KPIs
+    y_ist = float(_predict(model, base_row)[0])
+    hit = abs(y_star - target_value) <= max(0.005, 0.01 * target_value)  # Toleranz 0.005 mm oder 1%
+    kpi1, kpi2, kpi3 = st.columns(3)
+    kpi1.metric("Aktuelle (IST) Dicke – Modell (mm)", f"{y_ist:.3f}")
+    kpi2.metric("Erwartete Dicke mit KI (mm)", f"{y_star:.3f}",
+                delta=f"{(y_star - y_ist):+.3f} mm")
+    kpi3.metric("Abstand zum Ziel (mm)", f"{(y_star - target_value):+.3f}")
+
+    st.markdown("---")
+
+    # Ergebnisstatus
+    if hit:
+        st.markdown("### 🟢 Ziel erreicht")
+        st.markdown(f"Die empfohlene Parametrisierung trifft die Ziel-Dicke **{target_value:.3f} mm** innerhalb der Toleranz.")
+    else:
+        st.markdown("### 🟠 Nähert sich dem Ziel")
+        st.markdown("Die beste gefundene Kombination liegt außerhalb der Toleranz – prüfe ggf. Grenzen, weitere steuerbare Parameter oder erhöhe die Exploration.")
+
+    # Vergleichstabelle (steuerbare zuerst, dann der Rest)
+    st.subheader("Vorgeschlagene Parameter (vollständig)")
+    order = controllables + [f for f in feature_names if f not in controllables]
+    df_show = df_out.set_index("Parameter").loc[order].reset_index()
+
+    # Markierungen für Grenzverletzungen
+    viol = ~df_show["Innerhalb Grenze?"]
+    if viol.any():
+        st.warning(f"{viol.sum()} Parameter liegen **außerhalb** der Grenzen – wurden jedoch auf Bounds geclippt. Bitte AA-Grenzen prüfen.")
+
+    st.dataframe(
+        df_show.style.format({
+            "Ist": "{:.4f}",
+            "KI-Empfehlung": "{:.4f}",
+            "Δ": "{:+.4f}",
+            "Grenze (min)": "{:.4f}",
+            "Grenze (max)": "{:.4f}"
+        }),
+        use_container_width=True, hide_index=True
+    )
+
+    st.subheader("Begründung (Einfluss je geändertem Parameter)")
+    st.caption("Ceteris-paribus: Änderung jedes einzelnen Features von Ist → KI bei sonst konstanten Werten.")
+    st.dataframe(eff_df, use_container_width=True, hide_index=True)
+
+    # Optionales Export-Objekt (Download als JSON)
+    export = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "target_mm": target_value,
+        "expected_mm": y_star,
+        "expected_error_mm": y_star - target_value,
+        "parameters": [
+            {
+                "name": r["Parameter"],
+                "value": float(r["KI-Empfehlung"]),
+                "min": float(r["Grenze (min)"]),
+                "max": float(r["Grenze (max)"]),
+                "frozen": r["Parameter"] not in controllables
+            }
+            for _, r in df_show.iterrows()
+        ]
+    }
+    json_bytes = json.dumps(export, indent=2).encode("utf-8")
+    st.download_button(
+        "⬇️ Rezept / AA-Vorschlag als JSON",
+        data=json_bytes,
+        file_name=f"rezept_vorschlag_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+        mime="application/json",
+        use_container_width=True
+    )
+
+# Fußnote
+st.markdown("---")
+st.markdown(
+    "<div class='small'>Hinweis: Die Inverssuche nutzt zufällige Exploration + lokale Koordinatensuche und "
+    "respektiert die angegebenen AA-Grenzen. Für strengere Szenarien können später deterministische "
+    "Optimizer (z. B. Differential Evolution) ergänzt werden.</div>",
+    unsafe_allow_html
