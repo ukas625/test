@@ -1,0 +1,247 @@
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import ttkbootstrap as tb  # Moderne Themes für Tkinter
+import cv2  # OpenCV für die Videoverarbeitung
+import os
+import threading
+import piexif  # --- NEU: Zum Schreiben von EXIF-Daten
+from datetime import datetime  # --- NEU: Um den Zeitstempel zu holen
+
+# -----------------------------------------------------------------------------
+# Hauptanwendungsklasse
+# -----------------------------------------------------------------------------
+class VideoFrameExtractorApp:
+
+    def __init__(self, root):
+        """Initialisiert die GUI-Komponenten."""
+        self.root = root
+        self.root.title("Video Frame Extractor (v2 - mit EXIF)")
+        self.root.geometry("750x350")  # Startgröße des Fensters
+        
+        # Haupt-Frame mit Padding
+        main_frame = tb.Frame(self.root, padding=20)
+        main_frame.pack(fill="both", expand=True)
+
+        # Grid-Layout konfigurieren (Spalte 1 soll sich ausdehnen)
+        main_frame.columnconfigure(1, weight=1)
+
+        # --- Zeile 1: Videodatei auswählen ---
+        tb.Label(main_frame, text="Videodatei:", font=("Helvetica", 10)).grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        
+        self.video_path_entry = tb.Entry(main_frame, font=("Helvetica", 10))
+        self.video_path_entry.grid(row=0, column=1, padx=5, pady=10, sticky="ew")
+        
+        self.video_btn = tb.Button(main_frame, text="Durchsuchen...", command=self.select_video_file, style="primary.TButton")
+        self.video_btn.grid(row=0, column=2, padx=10, pady=10)
+
+        # --- Zeile 2: Speicherordner auswählen ---
+        tb.Label(main_frame, text="Speicherordner:", font=("Helvetica", 10)).grid(row=1, column=0, padx=10, pady=10, sticky="w")
+        
+        self.output_folder_entry = tb.Entry(main_frame, font=("Helvetica", 10))
+        self.output_folder_entry.grid(row=1, column=1, padx=5, pady=10, sticky="ew")
+        
+        self.output_btn = tb.Button(main_frame, text="Auswählen...", command=self.select_output_folder, style="primary.TButton")
+        self.output_btn.grid(row=1, column=2, padx=10, pady=10)
+
+        # --- Zeile 3: Intervall festlegen ---
+        tb.Label(main_frame, text="Intervall (Sekunden):", font=("Helvetica", 10)).grid(row=2, column=0, padx=10, pady=10, sticky="w")
+        
+        self.interval_entry = tb.Entry(main_frame, font=("Helvetica", 10), width=10)
+        self.interval_entry.grid(row=2, column=1, padx=5, pady=10, sticky="w")
+        self.interval_entry.insert(0, "30")  # Standardwert 30 Sekunden
+
+        # --- Zeile 4: Start-Button ---
+        self.start_button = tb.Button(main_frame, text="Extraktion starten", command=self.start_processing_thread, style="success.TButton", padding=10)
+        self.start_button.grid(row=3, column=0, columnspan=3, pady=20, sticky="ew")
+
+        # --- Zeile 5: Statusleiste ---
+        self.status_label = tb.Label(main_frame, text="Bereit.", anchor="w", font=("Helvetica", 9))
+        self.status_label.grid(row=4, column=0, columnspan=3, pady=10, sticky="ew")
+        
+        # Verhindern, dass die Fenstergröße zu klein wird
+        self.root.minsize(700, 320)
+
+    # -------------------------------------------------------------------------
+    # GUI-Callback-Funktionen (Aktionen)
+    # -------------------------------------------------------------------------
+
+    def select_video_file(self):
+        """Öffnet einen Dialog zur Auswahl der Videodatei."""
+        filetypes = (
+            ("Videodateien", "*.mp4 *.avi *.mov *.mkv"),
+            ("Alle Dateien", "*.*")
+        )
+        path = filedialog.askopenfilename(title="Videodatei auswählen", filetypes=filetypes)
+        if path:
+            self.video_path_entry.delete(0, "end")
+            self.video_path_entry.insert(0, path)
+
+    def select_output_folder(self):
+        """Öffnet einen Dialog zur Auswahl des Speicherordners."""
+        path = filedialog.askdirectory(title="Speicherordner auswählen")
+        if path:
+            self.output_folder_entry.delete(0, "end")
+            self.output_folder_entry.insert(0, path)
+
+    def start_processing_thread(self):
+        """
+        Startet die Videoverarbeitung in einem separaten Thread,
+        um ein Einfrieren der GUI zu verhindern.
+        """
+        # 1. Eingaben auslesen
+        video_path = self.video_path_entry.get()
+        output_folder = self.output_folder_entry.get()
+        interval_str = self.interval_entry.get()
+
+        # 2. Eingaben validieren
+        if not os.path.exists(video_path):
+            messagebox.showerror("Fehler", "Der angegebene Videopfad ist ungültig.")
+            return
+        
+        if not output_folder:
+            messagebox.showerror("Fehler", "Bitte einen gültigen Speicherordner auswählen.")
+            return
+            
+        try:
+            interval_sec = float(interval_str)
+            if interval_sec <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Fehler", "Ungültiges Intervall. Bitte eine positive Zahl (z.B. 0.5, 10, 30) eingeben.")
+            return
+
+        # 3. GUI für die Verarbeitung vorbereiten
+        self.start_button.config(state="disabled", text="Verarbeite...")
+        self.status_label.config(text="Verarbeitung wird gestartet...")
+
+        # 4. Den Verarbeitungs-Thread starten
+        processing_thread = threading.Thread(
+            target=self.process_video, 
+            args=(video_path, output_folder, interval_sec),
+            daemon=True
+        )
+        processing_thread.start()
+
+    # -------------------------------------------------------------------------
+    # Logik für die Videoverarbeitung (läuft im separaten Thread)
+    # -------------------------------------------------------------------------
+
+    def process_video(self, video_path, output_folder, interval_sec):
+        """
+        Liest das Video und speichert Bilder im festgelegten Intervall,
+        inklusive EXIF-Zeitstempel.
+        """
+        try:
+            os.makedirs(output_folder, exist_ok=True)
+            
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                raise IOError(f"Fehler beim Öffnen der Videodatei: {video_path}")
+
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps == 0:
+                # --- NEU: Versuchen, FPS manuell zu schätzen, falls cap.get fehlschlägt ---
+                print("Warnung: FPS konnte nicht gelesen werden (Wert ist 0). Verwende Standard-FPS 30.")
+                fps = 30 # Standard-Fallback
+
+            frame_interval = int(fps * interval_sec)
+            if frame_interval <= 0:
+                frame_interval = 1 
+            
+            count = 0
+            frame_id = 0
+            
+            self.root.after(0, self.update_status, "Verarbeitung gestartet...")
+
+            while cap.isOpened():
+                ret, frame = cap.read()
+                
+                if not ret:
+                    break
+                
+                if count % frame_interval == 0:
+                    filename = os.path.join(output_folder, f"frame_{frame_id:05d}.jpg")
+                    
+                    # Schritt 1: Bild normal mit OpenCV speichern
+                    cv2.imwrite(filename, frame)
+                    
+                    # --- NEU: EXIF-Timestamp hinzufügen ---
+                    try:
+                        # Aktuelles Datum und Uhrzeit holen
+                        now = datetime.now()
+                        # EXIF-konformen Zeitstempel-String erstellen (YYYY:MM:DD HH:MM:SS)
+                        timestamp_str = now.strftime("%Y:%m:%d %H:%M:%S")
+                        
+                        # EXIF-Daten-Dictionary erstellen
+                        # Wir setzen die drei gängigsten Zeitstempel-Felder
+                        exif_dict = {
+                            "0th": {
+                                piexif.ImageIFD.DateTime: timestamp_str.encode('utf-8')
+                            },
+                            "Exif": {
+                                piexif.ExifIFD.DateTimeOriginal: timestamp_str.encode('utf-8'),
+                                piexif.ExifIFD.DateTimeDigitized: timestamp_str.encode('utf-8')
+                            }
+                        }
+                        
+                        # EXIF-Daten in Bytes umwandeln
+                        exif_bytes = piexif.dump(exif_dict)
+                        
+                        # EXIF-Bytes in die gerade gespeicherte JPG-Datei einfügen
+                        piexif.insert(exif_bytes, filename)
+                        
+                    except Exception as e:
+                        # Falls das Schreiben der EXIF-Daten fehlschlägt, ist das Bild trotzdem gespeichert.
+                        # Wir geben eine Warnung in der Konsole aus, brechen aber nicht ab.
+                        print(f"Warnung: EXIF-Daten konnten nicht für {filename} geschrieben werden: {e}")
+                    # --- Ende EXIF-Logik ---
+
+                    status_msg = f"Speichere Bild {frame_id} (mit EXIF)..." # --- NEU: Text angepasst ---
+                    self.root.after(0, self.update_status, status_msg)
+                    
+                    frame_id += 1
+                
+                count += 1
+            
+            success_msg = f"Fertig! {frame_id} Bilder wurden in '{output_folder}' gespeichert."
+            self.root.after(0, self.on_processing_complete, success_msg, "Erfolg")
+
+        except Exception as e:
+            error_msg = f"Fehler bei der Verarbeitung: {e}"
+            self.root.after(0, self.on_processing_complete, error_msg, "Fehler")
+        
+        finally:
+            if 'cap' in locals() and cap.isOpened():
+                cap.release()
+
+    # -------------------------------------------------------------------------
+    # Thread-sichere GUI-Update-Funktionen (laufen im Haupt-Thread)
+    # -------------------------------------------------------------------------
+
+    def update_status(self, message):
+        """Aktualisiert die Statusleiste (Thread-sicher)."""
+        self.status_label.config(text=message)
+
+    def on_processing_complete(self, message, title):
+        """
+        Wird aufgerufen, wenn der Thread fertig ist (entweder erfolgreich oder mit Fehler).
+        Setzt die GUI zurück.
+        """
+        self.status_label.config(text=message)
+        self.start_button.config(state="normal", text="Extraktion starten")
+        
+        if title == "Erfolg":
+            messagebox.showinfo("Verarbeitung abgeschlossen", message)
+        else:
+            messagebox.showerror("Verarbeitung fehlgeschlagen", message)
+
+
+# -----------------------------------------------------------------------------
+# Hauptprogramm (Startet die Anwendung)
+# -----------------------------------------------------------------------------
+if __name__ == "__main__":
+    # 'darkly' ist ein gutes dunkles Theme. Andere Optionen: 'litera', 'superhero', 'vapor'
+    root = tb.Window(themename="darkly") 
+    app = VideoFrameExtractorApp(root)
+    root.mainloop()
+
