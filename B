@@ -1,216 +1,80 @@
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import ttkbootstrap as tb
-import cv2
+# --- Gesamtes Skript für eine Jupyter-Zelle ---
+
+# 1. Installation (falls nötig, Kommentar entfernen)
+# !pip install Pillow
+
+# 2. Importe
 import os
-import threading
-import piexif
-from datetime import datetime, timedelta
+from PIL import Image, ImageEnhance
+from IPython.display import display, HTML
 
-# --- Hachoir Importe für Metadaten-Extraktion ---
-try:
-    from hachoir.parser import createParser
-    from hachoir.metadata import extractMetadata
-    HACHOIR_AVAILABLE = True
-except ImportError:
-    HACHOIR_AVAILABLE = False
+# 3. Pfade und Faktoren definieren
+# WICHTIG: Diese Zelle setzt voraus, dass die Variable 'IMG_DIR' bereits existiert.
+# Falls nicht, ersetze 'IMG_DIR' unten durch deinen Pfad, z.B. "meine_bilder"
+# ----------------------------------------------------------------------------
+# Beispiel: IMG_DIR = "pfad/zu/deinen/bildern" 
+# ----------------------------------------------------------------------------
 
-# -----------------------------------------------------------------------------
-# Hilfsfunktion: Videostartzeit ermitteln
-# -----------------------------------------------------------------------------
-def get_video_creation_time(video_path):
-    """
-    Versucht, das echte 'Media Created'-Datum aus den Metadaten zu lesen.
-    Fallback: Dateisystem-Erstellungsdatum.
-    """
-    creation_time = None
+OUTPUT_DIR = "bilder_bearbeitet" # Name des neuen Ordners
 
-    # Methode 1: Versuch mit Hachoir (Liest interne Metadaten)
-    if HACHOIR_AVAILABLE:
-        try:
-            parser = createParser(video_path)
-            if parser:
-                with parser:
-                    metadata = extractMetadata(parser)
-                    if metadata and metadata.has("creation_date"):
-                        creation_time = metadata.get("creation_date")
-                        print(f"Metadatum gefunden: {creation_time}")
-        except Exception as e:
-            print(f"Hachoir Fehler: {e}")
+# Faktoren basierend auf deiner Anfrage:
+# Helligkeit 100% Zunahme = Faktor 2.0
+# Belichtung 50% Zunahme  = Faktor 1.5
+# Kontrast 100% Zunahme   = Faktor 2.0
 
-    # Methode 2: Fallback auf Dateisystem (Falls Metadaten fehlen)
-    if creation_time is None:
-        try:
-            # Unter Windows ist getctime oft das Erstellungsdatum
-            timestamp = os.path.getctime(video_path)
-            creation_time = datetime.fromtimestamp(timestamp)
-            print(f"Fallback auf Dateisystem-Datum: {creation_time}")
-        except Exception:
-            # Letzter Ausweg: Jetzt
-            creation_time = datetime.now()
+# Da Helligkeit & Belichtung beide 'Brightness' in Pillow sind, multiplizieren wir sie:
+FAKTOR_HELLIGKEIT_BELICHTUNG = 2.0 * 1.5  # Ergibt 3.0
+FAKTOR_KONTRAST = 2.0
 
-    return creation_time
+# 4. Prüfen, ob der Input-Ordner existiert
+if not 'IMG_DIR' in locals() or not os.path.isdir(IMG_DIR):
+    display(HTML(f"<b style='color:red;'>FEHLER:</b> Die Variable <b>IMG_DIR</b> ist nicht gesetzt oder der Pfad <b>'{IMG_DIR if 'IMG_DIR' in locals() else 'nicht gesetzt'}'</b> existiert nicht."))
+    display(HTML("Bitte setze die Variable IMG_DIR in einer Zelle darüber, z.B.: <pre>IMG_DIR = 'dein_ordner_name'</pre>"))
+else:
+    # 5. Ausgabeordner erstellen
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+        print(f"Ausgabeordner erstellt: {OUTPUT_DIR}")
 
-# -----------------------------------------------------------------------------
-# Hauptanwendungsklasse
-# -----------------------------------------------------------------------------
-class VideoFrameExtractorApp:
+    # 6. Haupt-Verarbeitungsschleife
+    BILD_ENDUNGEN = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff')
+    count = 0
+    print(f"Starte Verarbeitung von Bildern in: {IMG_DIR}...")
+    
+    # Warnung zur Überbelichtung
+    display(HTML(f"<b style='color:orange;'>WARNUNG:</b> Die kombinierten Faktoren (Helligkeit {FAKTOR_HELLIGKEIT_BELICHTUNG}x, Kontrast {FAKTOR_KONTRAST}x) werden die Bilder wahrscheinlich <b>extrem überbelichten</b> (fast weiß)."))
 
-    def __init__(self, root):
-        self.root = root
-        self.root.title("KI Training Data Extractor (EXIF Sync)")
-        self.root.geometry("800x450")
-        
-        main_frame = tb.Frame(self.root, padding=20)
-        main_frame.pack(fill="both", expand=True)
-        main_frame.columnconfigure(1, weight=1)
+    for dateiname in os.listdir(IMG_DIR):
+        if dateiname.lower().endswith(BILD_ENDUNGEN):
+            try:
+                # Pfade erstellen
+                input_pfad = os.path.join(IMG_DIR, dateiname)
+                output_pfad = os.path.join(OUTPUT_DIR, dateiname)
 
-        # Zeile 1: Video
-        tb.Label(main_frame, text="Videodatei:", font=("Helvetica", 10)).grid(row=0, column=0, sticky="w", pady=10)
-        self.video_path_entry = tb.Entry(main_frame)
-        self.video_path_entry.grid(row=0, column=1, sticky="ew", padx=5)
-        tb.Button(main_frame, text="Suchen", command=self.select_video_file, style="primary.TButton").grid(row=0, column=2, padx=5)
+                # 1. Bild öffnen
+                img = Image.open(input_pfad)
 
-        # Zeile 2: Output
-        tb.Label(main_frame, text="Speicherordner:", font=("Helvetica", 10)).grid(row=1, column=0, sticky="w", pady=10)
-        self.output_folder_entry = tb.Entry(main_frame)
-        self.output_folder_entry.grid(row=1, column=1, sticky="ew", padx=5)
-        tb.Button(main_frame, text="Wählen", command=self.select_output_folder, style="primary.TButton").grid(row=1, column=2, padx=5)
+                # 2. Helligkeit & Belichtung anwenden
+                enhancer_hell = ImageEnhance.Brightness(img)
+                img = enhancer_hell.enhance(FAKTOR_HELLIGKEIT_BELICHTUNG)
 
-        # Zeile 3: Intervall
-        tb.Label(main_frame, text="Intervall (Sek):", font=("Helvetica", 10)).grid(row=2, column=0, sticky="w", pady=10)
-        self.interval_entry = tb.Entry(main_frame, width=10)
-        self.interval_entry.grid(row=2, column=1, sticky="w", padx=5)
-        self.interval_entry.insert(0, "5") # Standard 5 Sekunden
+                # 3. Kontrast anwenden
+                enhancer_kontrast = ImageEnhance.Contrast(img)
+                img = enhancer_kontrast.enhance(FAKTOR_KONTRAST)
 
-        # Zeile 4: Info Box
-        info_text = "Hinweis: Das Programm liest das 'Aufnahmedatum' aus dem Video und rechnet\nfür jedes extrahierte Bild die exakte Zeit hinzu (Startzeit + Videoposition)."
-        tb.Label(main_frame, text=info_text, font=("Helvetica", 8), bootstyle="secondary").grid(row=3, column=0, columnspan=3, pady=5, sticky="w")
-
-        # Zeile 5: Start
-        self.start_button = tb.Button(main_frame, text="Extraktion starten", command=self.start_processing_thread, style="success.TButton")
-        self.start_button.grid(row=4, column=0, columnspan=3, pady=20, sticky="ew")
-
-        # Zeile 6: Progress Bar & Status
-        self.progress = tb.Progressbar(main_frame, mode='determinate', bootstyle="success")
-        self.progress.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 10))
-        
-        self.status_label = tb.Label(main_frame, text="Bereit.", font=("Helvetica", 9))
-        self.status_label.grid(row=6, column=0, columnspan=3, sticky="w")
-
-    def select_video_file(self):
-        path = filedialog.askopenfilename(filetypes=[("Videos", "*.mp4 *.mov *.avi"), ("Alle", "*.*")])
-        if path:
-            self.video_path_entry.delete(0, "end")
-            self.video_path_entry.insert(0, path)
-
-    def select_output_folder(self):
-        path = filedialog.askdirectory()
-        if path:
-            self.output_folder_entry.delete(0, "end")
-            self.output_folder_entry.insert(0, path)
-
-    def start_processing_thread(self):
-        video_path = self.video_path_entry.get()
-        output_folder = self.output_folder_entry.get()
-        try:
-            interval = float(self.interval_entry.get())
-        except ValueError:
-            messagebox.showerror("Fehler", "Intervall muss eine Zahl sein.")
-            return
-
-        if not os.path.exists(video_path) or not output_folder:
-            messagebox.showerror("Fehler", "Pfade überprüfen.")
-            return
-
-        self.start_button.config(state="disabled")
-        threading.Thread(target=self.process_video, args=(video_path, output_folder, interval), daemon=True).start()
-
-    def process_video(self, video_path, output_folder, interval_sec):
-        try:
-            os.makedirs(output_folder, exist_ok=True)
-            
-            # 1. Startzeit ermitteln
-            start_time = get_video_creation_time(video_path)
-            self.update_status(f"Startzeit ermittelt: {start_time}")
-
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened(): raise IOError("Video konnte nicht geöffnet werden")
-
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            if fps == 0: fps = 30.0
-            
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            frame_interval = int(fps * interval_sec)
-            if frame_interval < 1: frame_interval = 1
-
-            count = 0
-            saved_count = 0
-
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret: break
-
-                if count % frame_interval == 0:
-                    # 2. Zeit berechnen: Startzeit + (Aktueller Frame / FPS)
-                    seconds_elapsed = count / fps
-                    current_image_time = start_time + timedelta(seconds=seconds_elapsed)
-                    
-                    # Dateiname
-                    filename = os.path.join(output_folder, f"frame_{saved_count:05d}.jpg")
-                    cv2.imwrite(filename, frame)
-
-                    # 3. EXIF schreiben
-                    try:
-                        time_str = current_image_time.strftime("%Y:%m:%d %H:%M:%S")
-                        exif_dict = {
-                            "0th": {piexif.ImageIFD.DateTime: time_str.encode('utf-8')},
-                            "Exif": {
-                                piexif.ExifIFD.DateTimeOriginal: time_str.encode('utf-8'),
-                                piexif.ExifIFD.DateTimeDigitized: time_str.encode('utf-8')
-                            }
-                        }
-                        piexif.insert(piexif.dump(exif_dict), filename)
-                    except Exception as e:
-                        print(f"EXIF Fehler: {e}")
-
-                    saved_count += 1
-                    
-                    # GUI Update
-                    progress_val = (count / total_frames) * 100
-                    self.root.after(0, self.update_progress, progress_val, f"Speichere Bild {saved_count} ({time_str})...")
+                # 4. Bild speichern
+                img.save(output_pfad)
+                
+                # Zeige das erste verarbeitete Bild als Beispiel
+                if count == 0:
+                    print("\n--- Beispiel-Ergebnis (erstes Bild) ---")
+                    img.thumbnail((400, 400)) # Verkleinern für Anzeige
+                    display(img)
+                    print("-------------------------------------------\n")
 
                 count += 1
+            
+            except Exception as e:
+                print(f"Fehler bei der Verarbeitung von {dateiname}: {e}")
 
-            self.root.after(0, self.finish_process, f"Fertig! {saved_count} Bilder gespeichert.")
-
-        except Exception as e:
-            self.root.after(0, self.finish_process, f"Fehler: {str(e)}")
-        finally:
-            if 'cap' in locals(): cap.release()
-
-    def update_status(self, msg):
-        self.status_label.config(text=msg)
-
-    def update_progress(self, val, msg):
-        self.progress['value'] = val
-        self.status_label.config(text=msg)
-
-    def finish_process(self, msg):
-        self.status_label.config(text=msg)
-        self.progress['value'] = 100
-        self.start_button.config(state="normal")
-        if "Fehler" in msg:
-            messagebox.showerror("Info", msg)
-        else:
-            messagebox.showinfo("Info", msg)
-
-if __name__ == "__main__":
-    if not HACHOIR_AVAILABLE:
-        print("ACHTUNG: 'hachoir' ist nicht installiert. EXIF-Daten sind möglicherweise ungenau.")
-        print("Bitte installieren mit: pip install hachoir")
-    
-    root = tb.Window(themename="darkly")
-    app = VideoFrameExtractorApp(root)
-    root.mainloop()
-
+    print(f"\n✅ Verarbeitung abgeschlossen. {count} Bilder wurden in '{OUTPUT_DIR}' gespeichert.")
