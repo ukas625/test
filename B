@@ -12,3 +12,17 @@ Moderne Deep-Learning-Modelle für Sprache und Text (z. B. ChatGPT), äußerst k
 
 💡 Gemeinsamkeit:
 Alle lernen aus Daten, um Ergebnisse, Entscheidungen oder Vorhersagen zu treffen.
+
+Projektziele
+	•	Entwicklung einer KI-basierten Vorhersage der Schaumdicke an der Streichmaschine KM9
+	•	Nutzung historischer Maschinendaten zur Analyse und Erkennung von Mustern im Prozess
+	•	Einsatz eines Machine-Learning-Modells (Random Forest) zur Berechnung der erwarteten Schaumdicke
+	•	Aufbau eines Dashboards, das Vorhersagen, Einflussgrößen und Empfehlungen visuell darstellt
+	•	Verknüpfung der KI mit bestehenden Arbeitsanweisungen, um diese zu verstehen und datenbasiert zu verbessern
+	•	Erhalt von Erfahrungswissen durch Auswertung, welche Einstellungen in der Praxis erfolgreich waren
+
+⸻
+
+➡️ Ziel:
+Eine verständliche, erklärbare und datengetriebene Unterstützung für den Maschinenführer schaffen,
+um stabilere Prozesse, bessere Qualität und nachvollziehbare Entscheidungen zu ermöglichen.
