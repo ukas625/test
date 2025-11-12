@@ -1,80 +1,14 @@
-# --- Gesamtes Skript für eine Jupyter-Zelle ---
+Verhältnis zwischen KI, ML, DL und Transformer
+	•	Künstliche Intelligenz (KI):
+Oberbegriff für Systeme, die mithilfe mathematischer Verfahren menschliches Denken und Lernen nachbilden.
+	•	Maschinelles Lernen (ML):
+Teilgebiet der KI, das mit statistischen Methoden aus Daten Muster erkennt und verständlich Vorhersagen trifft.
+	•	Deep Learning (DL):
+Spezialisierte Form des maschinellen Lernens mit neuronalen Netzen, sehr leistungsfähig, aber schwer erklärbar.
+	•	Transformer-Modelle:
+Moderne Deep-Learning-Modelle für Sprache und Text (z. B. ChatGPT), äußerst komplex und kaum nachvollziehbar.
 
-# 1. Installation (falls nötig, Kommentar entfernen)
-# !pip install Pillow
+⸻
 
-# 2. Importe
-import os
-from PIL import Image, ImageEnhance
-from IPython.display import display, HTML
-
-# 3. Pfade und Faktoren definieren
-# WICHTIG: Diese Zelle setzt voraus, dass die Variable 'IMG_DIR' bereits existiert.
-# Falls nicht, ersetze 'IMG_DIR' unten durch deinen Pfad, z.B. "meine_bilder"
-# ----------------------------------------------------------------------------
-# Beispiel: IMG_DIR = "pfad/zu/deinen/bildern" 
-# ----------------------------------------------------------------------------
-
-OUTPUT_DIR = "bilder_bearbeitet" # Name des neuen Ordners
-
-# Faktoren basierend auf deiner Anfrage:
-# Helligkeit 100% Zunahme = Faktor 2.0
-# Belichtung 50% Zunahme  = Faktor 1.5
-# Kontrast 100% Zunahme   = Faktor 2.0
-
-# Da Helligkeit & Belichtung beide 'Brightness' in Pillow sind, multiplizieren wir sie:
-FAKTOR_HELLIGKEIT_BELICHTUNG = 2.0 * 1.5  # Ergibt 3.0
-FAKTOR_KONTRAST = 2.0
-
-# 4. Prüfen, ob der Input-Ordner existiert
-if not 'IMG_DIR' in locals() or not os.path.isdir(IMG_DIR):
-    display(HTML(f"<b style='color:red;'>FEHLER:</b> Die Variable <b>IMG_DIR</b> ist nicht gesetzt oder der Pfad <b>'{IMG_DIR if 'IMG_DIR' in locals() else 'nicht gesetzt'}'</b> existiert nicht."))
-    display(HTML("Bitte setze die Variable IMG_DIR in einer Zelle darüber, z.B.: <pre>IMG_DIR = 'dein_ordner_name'</pre>"))
-else:
-    # 5. Ausgabeordner erstellen
-    if not os.path.exists(OUTPUT_DIR):
-        os.makedirs(OUTPUT_DIR)
-        print(f"Ausgabeordner erstellt: {OUTPUT_DIR}")
-
-    # 6. Haupt-Verarbeitungsschleife
-    BILD_ENDUNGEN = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff')
-    count = 0
-    print(f"Starte Verarbeitung von Bildern in: {IMG_DIR}...")
-    
-    # Warnung zur Überbelichtung
-    display(HTML(f"<b style='color:orange;'>WARNUNG:</b> Die kombinierten Faktoren (Helligkeit {FAKTOR_HELLIGKEIT_BELICHTUNG}x, Kontrast {FAKTOR_KONTRAST}x) werden die Bilder wahrscheinlich <b>extrem überbelichten</b> (fast weiß)."))
-
-    for dateiname in os.listdir(IMG_DIR):
-        if dateiname.lower().endswith(BILD_ENDUNGEN):
-            try:
-                # Pfade erstellen
-                input_pfad = os.path.join(IMG_DIR, dateiname)
-                output_pfad = os.path.join(OUTPUT_DIR, dateiname)
-
-                # 1. Bild öffnen
-                img = Image.open(input_pfad)
-
-                # 2. Helligkeit & Belichtung anwenden
-                enhancer_hell = ImageEnhance.Brightness(img)
-                img = enhancer_hell.enhance(FAKTOR_HELLIGKEIT_BELICHTUNG)
-
-                # 3. Kontrast anwenden
-                enhancer_kontrast = ImageEnhance.Contrast(img)
-                img = enhancer_kontrast.enhance(FAKTOR_KONTRAST)
-
-                # 4. Bild speichern
-                img.save(output_pfad)
-                
-                # Zeige das erste verarbeitete Bild als Beispiel
-                if count == 0:
-                    print("\n--- Beispiel-Ergebnis (erstes Bild) ---")
-                    img.thumbnail((400, 400)) # Verkleinern für Anzeige
-                    display(img)
-                    print("-------------------------------------------\n")
-
-                count += 1
-            
-            except Exception as e:
-                print(f"Fehler bei der Verarbeitung von {dateiname}: {e}")
-
-    print(f"\n✅ Verarbeitung abgeschlossen. {count} Bilder wurden in '{OUTPUT_DIR}' gespeichert.")
+💡 Gemeinsamkeit:
+Alle lernen aus Daten, um Ergebnisse, Entscheidungen oder Vorhersagen zu treffen.
