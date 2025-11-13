@@ -411,9 +411,6 @@ with st.expander("Eingangsfeatures am aktuellen Zeitpunkt anzeigen"):
 
 
 
-
-
-
 import io
 import os
 import json
@@ -751,4 +748,54 @@ if assist_result is None:
 else:
     best_row = assist_result["best_row"]
     best_pred = assist_result["best_pred"]
-    best_e_
+    best_error = assist_result["best_error"]
+
+    # Kennzahlen der Empfehlung
+    col_b1, col_b2, col_b3 = st.columns(3)
+    col_b1.metric("Prognose mit Empfehlung", f"{best_pred:.4f}")
+    col_b2.metric("Differenz zur Soll-Dicke", f"{(best_pred - target_thickness):+.4f}")
+    col_b3.metric("Verbesserung (|Fehler|)", f"{abs(y_pred_current - target_thickness) - best_error:+.4f}")
+
+    # Vergleichstabelle nur für regelbare Parameter
+    df_cmp = pd.DataFrame({
+        "Parameter": control_features,
+        "Aktuell": [float(x_current[cf]) for cf in control_features],
+        "Empfehlung": [float(best_row[cf]) for cf in control_features],
+    })
+    df_cmp["Delta"] = df_cmp["Empfehlung"] - df_cmp["Aktuell"]
+
+    st.markdown("**Vergleich der regelbaren Maschinenparameter**")
+    st.dataframe(df_cmp, use_container_width=True)
+
+    # Balkendiagramm der Anpassungen
+    fig_delta = px.bar(
+        df_cmp,
+        x="Parameter",
+        y="Delta",
+        labels={"Delta": "Empfohlene Änderung", "Parameter": "Parameter"},
+    )
+    fig_delta.update_layout(margin=dict(l=10, r=10, t=40, b=10))
+    st.plotly_chart(fig_delta, use_container_width=True)
+
+    st.caption(
+        "Positive Werte bedeuten: der Parameter soll **erhöht**, negative Werte: **verringert** werden. "
+        "Die empfohlenen Werte respektieren die oben definierten physikalischen Grenzen."
+    )
+
+    with st.expander("Vollständiger empfohlener Eingangsvektor (alle Features)"):
+        st.dataframe(best_row[feature_names].to_frame().T, use_container_width=True)
+
+# ------------------------------------------------------------------
+# 7. Hinweis zu Transparenz & Logging
+# ------------------------------------------------------------------
+
+st.markdown("---")
+st.markdown(
+    "🔎 **Transparenz & Logging:**\n"
+    f"Jede Berechnung (Soll-Dicke, ausgewählter Messpunkt, aktuelle Prognose, "
+    f"empfohlene Parameter, neue Prognose) wird automatisch in der Datei "
+    f"`{LOG_PATH}` protokolliert. Dadurch sind Entscheidungen des Modells "
+    "nachvollziehbar und können im Sinne des EU AI Act geprüft werden. "
+    "Der Maschinenführer behält die letzte Entscheidungshoheit – das System "
+    "gibt lediglich Empfehlungen und greift nicht selbstständig in die Steuerung ein."
+)
