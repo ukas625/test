@@ -162,14 +162,22 @@ st.markdown(f"**Geladene Fahrt:** {n_points} Messpunkte")
 
 st.sidebar.subheader("Replay-Steuerung")
 
-replay_index = st.sidebar.slider(
-    "Replay-Position",
-    min_value=0,
-    max_value=max(0, n_points - 1),
-    value=max(0, n_points - 1),
-    step=1,
-    help="Bewegt sich von Start der Fahrt (0) bis zum letzten Punkt."
-)
+if n_points <= 1:
+    # Kein Slider möglich – wir nehmen einfach den einzigen Punkt
+    st.sidebar.info(
+        "Die geladene Fahrt enthält nur "
+        f"{n_points} Messpunkt(e). Der Replay-Slider ist daher deaktiviert."
+    )
+    replay_index = 0
+else:
+    replay_index = st.sidebar.slider(
+        "Replay-Position",
+        min_value=0,
+        max_value=n_points - 1,
+        value=n_points - 1,
+        step=1,
+        help="Bewegt sich von Start der Fahrt (0) bis zum letzten Punkt."
+    )
 
 start_idx = max(0, replay_index - window_size)
 df_window = df_res.iloc[start_idx:replay_index + 1].copy()
@@ -179,6 +187,7 @@ st.caption(
     f"Anzeigezeitraum von Punkt {start_idx} bis {replay_index} "
     f"(von insgesamt {n_points} Messpunkten)."
 )
+
 
 
 # ------------------------------------------------------------------
