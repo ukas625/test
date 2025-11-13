@@ -405,3 +405,350 @@ col_c3.metric("Fehler (Echt - Modell)", f"{current_err:.4f}")
 
 with st.expander("Eingangsfeatures am aktuellen Zeitpunkt anzeigen"):
     st.dataframe(X_features.iloc[[replay_index]].T, use_container_width=True)
+
+
+
+
+
+
+
+
+
+import io
+import os
+import json
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+import joblib
+import plotly.express as px
+
+# ------------------------------------------------------------------
+# 0. Grund-Setup
+# ------------------------------------------------------------------
+
+st.set_page_config(
+    page_title="KM9 KI-Dashboard – Assistenzsystem",
+    layout="wide"
+)
+
+st.title("KM9 KI-Dashboard – Assistenzsystem")
+st.caption(
+    "Empfehlungen für Maschinenparameter zur Erreichung einer Soll-Dicke "
+    "inklusive automatischem Logging für Nachvollziehbarkeit (EU AI Act)."
+)
+
+MODEL_PATH = "rf_dashboard.joblib"
+LOG_PATH = "assist_log.csv"
+
+# ------------------------------------------------------------------
+# 1. Modell laden
+# ------------------------------------------------------------------
+
+@st.cache_resource(show_spinner="Lade Random-Forest-Modell...")
+def load_model_bundle(path: str):
+    bundle = joblib.load(path)
+    return bundle
+
+bundle = load_model_bundle(MODEL_PATH)
+model = bundle["model"]
+feature_names = bundle["feature_names"]
+target_name = bundle["target_name"]
+trained_at = bundle.get("trained_at", "unbekannt")
+base_metrics = bundle.get("metrics", {})
+
+st.sidebar.subheader("Modell-Info")
+st.sidebar.write(f"**Trainiert am:** {trained_at}")
+st.sidebar.write(f"**Zielgröße:** `{target_name}`")
+st.sidebar.write(
+    f"**R² (Trainings-Eval):** {base_metrics.get('r2', float('nan')):.3f}  "
+    f"/ **MAE:** {base_metrics.get('mae', float('nan')):.4f}"
+)
+
+# ------------------------------------------------------------------
+# 2. Ziel-Dicke & Prozesszustand (CSV)
+# ------------------------------------------------------------------
+
+st.sidebar.subheader("Soll-Dicke & Prozesszustand")
+
+target_thickness = st.sidebar.number_input(
+    "Soll-Dicke in mm",
+    min_value=0.0,
+    max_value=5.0,
+    value=1.40,
+    step=0.01,
+    format="%.2f",
+    help="Zielwert, den das System durch Empfehlung der Maschinenparameter erreichen soll."
+)
+
+uploaded_file = st.sidebar.file_uploader(
+    "Prozesszustand-CSV laden",
+    type=["csv"],
+    help="CSV mit aktuellen Prozessparametern (Spalten wie im Training). "
+         "Kann eine oder mehrere Zeilen enthalten."
+)
+
+time_col_guess = st.sidebar.text_input(
+    "Zeitspalte (optional, z.B. 'timestamp')",
+    value="timestamp",
+    help="Nur für Anzeigezwecke – falls vorhanden, wird sie zur Auswahl des Messpunkts genutzt."
+)
+
+if uploaded_file is None:
+    st.info("Bitte links im Sidebar eine CSV mit aktuellen Prozessparametern hochladen.")
+    st.stop()
+
+# ------------------------------------------------------------------
+# 2.1 CSV einlesen & prüfen
+# ------------------------------------------------------------------
+
+try:
+    df_proc = pd.read_csv(uploaded_file)
+except Exception as e:
+    st.error(f"Fehler beim Einlesen der CSV: {e}")
+    st.stop()
+
+missing_features = [f for f in feature_names if f not in df_proc.columns]
+if missing_features:
+    st.error(
+        "Folgende Modell-Features fehlen in der geladenen CSV. "
+        "Die Struktur muss der Trainingsbasis entsprechen:\n\n"
+        + ", ".join(missing_features[:40])
+    )
+    st.stop()
+
+n_points = len(df_proc)
+st.markdown(f"**Geladene Prozesspunkte:** {n_points}")
+
+# Zeitspalte vorbereiten (nur für Anzeige/Selection)
+if time_col_guess in df_proc.columns:
+    df_proc[time_col_guess] = pd.to_datetime(df_proc[time_col_guess], errors="coerce")
+    has_time = True
+else:
+    has_time = False
+    df_proc["__idx_time__"] = df_proc.index
+
+# ------------------------------------------------------------------
+# 3. Messpunkt / Betriebszustand auswählen
+# ------------------------------------------------------------------
+
+st.sidebar.subheader("Messpunkt auswählen")
+
+if n_points == 1:
+    row_index = 0
+    st.sidebar.info("CSV enthält nur einen Messpunkt – dieser wird als aktueller Zustand verwendet.")
+else:
+    if has_time:
+        # Auswahl per Zeitstempel
+        options = df_proc.index.tolist()
+
+        def format_func(idx):
+            t = df_proc.loc[idx, time_col_guess]
+            return f"{idx} – {t}" if pd.notnull(t) else f"{idx}"
+
+        row_index = st.sidebar.selectbox(
+            "Messpunkt",
+            options=options,
+            index=len(options) - 1,  # Standard: letzter Punkt
+            format_func=format_func
+        )
+    else:
+        # Keine Zeitspalte -> Index-Slider
+        row_index = st.sidebar.slider(
+            "Messpunkt-Index",
+            min_value=0,
+            max_value=n_points - 1,
+            value=n_points - 1,
+            step=1
+        )
+
+x_current = df_proc.loc[row_index, feature_names].copy()
+x_current_df = x_current.to_frame().T  # für Modellvorhersage
+y_measured = df_proc.loc[row_index, target_name] if target_name in df_proc.columns else np.nan
+
+# aktuelle Modellprognose
+y_pred_current = float(model.predict(x_current_df)[0])
+
+# ------------------------------------------------------------------
+# 4. Regelbare Maschinenparameter & physikalische Grenzen
+# ------------------------------------------------------------------
+
+st.sidebar.subheader("Regelbare Maschinenparameter")
+
+# Heuristik: Vorschlag für Temperatur/Druck/Geschwindigkeit
+suggested_controls = [
+    f for f in feature_names
+    if any(key in f.lower() for key in ["temp", "temperatur", "druck", "press", "speed", "geschw"])
+]
+
+control_features = st.sidebar.multiselect(
+    "Regelbare Parameter auswählen",
+    options=feature_names,
+    default=suggested_controls,
+    help="Nur diese Größen werden vom System verändert. "
+         "Alle anderen Prozessgrößen werden auf dem aktuellen Wert gehalten."
+)
+
+if len(control_features) == 0:
+    st.warning("Bitte mindestens einen regelbaren Parameter auswählen.")
+    st.stop()
+
+st.sidebar.markdown("**Physikalische Grenzen**")
+st.sidebar.caption(
+    "Standardmäßig werden Minimum und Maximum aus der geladenen CSV verwendet. "
+    "Diese können bei Bedarf angepasst werden."
+)
+
+param_bounds = {}
+for cf in control_features:
+    col_min = float(df_proc[cf].min())
+    col_max = float(df_proc[cf].max())
+    low, high = sorted([col_min, col_max])
+
+    bounds = st.sidebar.slider(
+        cf,
+        min_value=float(low),
+        max_value=float(high),
+        value=(float(low), float(high)),
+        format="%.4f"
+    )
+    param_bounds[cf] = bounds
+
+# Anzahl der Kandidaten für die Suche
+n_candidates = st.sidebar.number_input(
+    "Anzahl Optimierungs-Kandidaten",
+    min_value=50,
+    max_value=2000,
+    value=300,
+    step=50,
+    help="Je mehr Kandidaten, desto genauer, aber desto langsamer."
+)
+
+# ------------------------------------------------------------------
+# 5. Optimierung: Empfehlungen berechnen
+# ------------------------------------------------------------------
+
+def optimize_controls(base_row: pd.Series,
+                      control_features: list,
+                      param_bounds: dict,
+                      target_value: float,
+                      n_samples: int = 300):
+    """
+    Einfache zufällige Suche im Raum der regelbaren Parameter.
+    Andere Prozessgrößen bleiben auf dem aktuellen Wert.
+    """
+    rng = np.random.default_rng(42)
+
+    # Start: aktueller Zustand (damit der immer im Vergleich ist)
+    best_row = base_row.copy()
+    best_pred = float(
+        model.predict(best_row[feature_names].to_frame().T)[0]
+    )
+    best_error = abs(best_pred - target_value)
+
+    for _ in range(n_samples):
+        cand = base_row.copy()
+        for cf in control_features:
+            low, high = param_bounds[cf]
+            cand[cf] = float(rng.uniform(low, high))
+
+        y_pred = float(
+            model.predict(cand[feature_names].to_frame().T)[0]
+        )
+        err = abs(y_pred - target_value)
+
+        if err < best_error:
+            best_error = err
+            best_pred = y_pred
+            best_row = cand
+
+    return best_row, best_pred, best_error
+
+
+def append_log(entry: dict):
+    """
+    Logging aller Empfehlungen zur späteren Nachvollziehbarkeit.
+    Die Parameter werden als JSON-Strings abgelegt.
+    """
+    df_log = pd.DataFrame([entry])
+    file_exists = os.path.exists(LOG_PATH)
+
+    if file_exists:
+        df_log.to_csv(LOG_PATH, mode="a", header=False, index=False)
+    else:
+        df_log.to_csv(LOG_PATH, mode="w", header=True, index=False)
+
+
+# Button für Berechnung
+calculate = st.button("Empfehlung berechnen")
+
+assist_result = None
+
+if calculate:
+    best_row, best_pred, best_error = optimize_controls(
+        base_row=x_current,
+        control_features=control_features,
+        param_bounds=param_bounds,
+        target_value=target_thickness,
+        n_samples=int(n_candidates)
+    )
+
+    # Ergebnisse für Anzeige merken
+    assist_result = {
+        "best_row": best_row,
+        "best_pred": best_pred,
+        "best_error": best_error,
+    }
+    st.session_state["assist_result"] = assist_result
+
+    # Logging vorbereiten
+    controls_current = {cf: float(x_current[cf]) for cf in control_features}
+    controls_recommended = {cf: float(best_row[cf]) for cf in control_features}
+
+    log_entry = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "target_thickness": float(target_thickness),
+        "pred_current": float(y_pred_current),
+        "pred_recommended": float(best_pred),
+        "measured_current": float(y_measured) if not np.isnan(y_measured) else np.nan,
+        "controls_current": json.dumps(controls_current),
+        "controls_recommended": json.dumps(controls_recommended),
+        "source_csv": uploaded_file.name,
+        "row_index": int(row_index),
+    }
+
+    append_log(log_entry)
+    st.success(f"Empfehlung berechnet und im Log (`{LOG_PATH}`) protokolliert.")
+
+# Falls schon vorher einmal berechnet wurde, letzten Stand aus Session anzeigen
+if assist_result is None and "assist_result" in st.session_state:
+    assist_result = st.session_state["assist_result"]
+
+# ------------------------------------------------------------------
+# 6. Anzeige: aktueller Zustand vs. Empfehlung
+# ------------------------------------------------------------------
+
+st.subheader("Aktueller Zustand am ausgewählten Messpunkt")
+
+col_a1, col_a2, col_a3 = st.columns(3)
+
+col_a1.metric("Ist-Dicke (Messwert)", f"{y_measured:.4f}" if not np.isnan(y_measured) else "n/a")
+col_a2.metric("Modellprognose (aktuell)", f"{y_pred_current:.4f}")
+col_a3.metric("Abweichung zur Soll-Dicke",
+              f"{(y_pred_current - target_thickness):+.4f}")
+
+with st.expander("Eingangsgrößen am aktuellen Messpunkt anzeigen"):
+    st.dataframe(x_current_df.T, use_container_width=True)
+
+st.markdown("---")
+
+st.subheader("Modellbasierte Empfehlung für Maschinenparameter")
+
+if assist_result is None:
+    st.info("Noch keine Empfehlung berechnet. Bitte oben auf **„Empfehlung berechnen“** klicken.")
+else:
+    best_row = assist_result["best_row"]
+    best_pred = assist_result["best_pred"]
+    best_e_
