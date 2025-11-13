@@ -1,28 +1,358 @@
-Verhältnis zwischen KI, ML, DL und Transformer
-	•	Künstliche Intelligenz (KI):
-Oberbegriff für Systeme, die mithilfe mathematischer Verfahren menschliches Denken und Lernen nachbilden.
-	•	Maschinelles Lernen (ML):
-Teilgebiet der KI, das mit statistischen Methoden aus Daten Muster erkennt und verständlich Vorhersagen trifft.
-	•	Deep Learning (DL):
-Spezialisierte Form des maschinellen Lernens mit neuronalen Netzen, sehr leistungsfähig, aber schwer erklärbar.
-	•	Transformer-Modelle:
-Moderne Deep-Learning-Modelle für Sprache und Text (z. B. ChatGPT), äußerst komplex und kaum nachvollziehbar.
+import io
+from datetime import datetime
 
-⸻
+import numpy as np
+import pandas as pd
+import streamlit as st
+import joblib
+import shap
+import plotly.express as px
 
-💡 Gemeinsamkeit:
-Alle lernen aus Daten, um Ergebnisse, Entscheidungen oder Vorhersagen zu treffen.
+# ------------------------------------------------------------------
+# 0. Grund-Setup
+# ------------------------------------------------------------------
 
-Projektziele
-	•	Entwicklung einer KI-basierten Vorhersage der Schaumdicke an der Streichmaschine KM9
-	•	Nutzung historischer Maschinendaten zur Analyse und Erkennung von Mustern im Prozess
-	•	Einsatz eines Machine-Learning-Modells (Random Forest) zur Berechnung der erwarteten Schaumdicke
-	•	Aufbau eines Dashboards, das Vorhersagen, Einflussgrößen und Empfehlungen visuell darstellt
-	•	Verknüpfung der KI mit bestehenden Arbeitsanweisungen, um diese zu verstehen und datenbasiert zu verbessern
-	•	Erhalt von Erfahrungswissen durch Auswertung, welche Einstellungen in der Praxis erfolgreich waren
+st.set_page_config(
+    page_title="KM9 KI-Dashboard – Analyse / Replay",
+    layout="wide"
+)
 
-⸻
+st.title("KM9 KI-Dashboard – Analyse / Replay Modus")
+st.caption("Vorhersage, Vergleich und Erklärbarkeit historischer Fahrten (HMI-ähnlich, reduziert gehalten).")
 
-➡️ Ziel:
-Eine verständliche, erklärbare und datengetriebene Unterstützung für den Maschinenführer schaffen,
-um stabilere Prozesse, bessere Qualität und nachvollziehbare Entscheidungen zu ermöglichen.
+
+# ------------------------------------------------------------------
+# 1. Modell laden
+# ------------------------------------------------------------------
+
+MODEL_PATH = "rf_dashboard.joblib"
+
+@st.cache_resource(show_spinner="Lade Random-Forest-Modell...")
+def load_model_bundle(path: str):
+    bundle = joblib.load(path)
+    return bundle
+
+bundle = load_model_bundle(MODEL_PATH)
+model = bundle["model"]
+feature_names = bundle["feature_names"]
+target_name = bundle["target_name"]
+trained_at = bundle.get("trained_at", "unbekannt")
+base_metrics = bundle.get("metrics", {})
+
+st.sidebar.subheader("Modell-Info")
+st.sidebar.write(f"**Trainiert am:** {trained_at}")
+st.sidebar.write(f"**Zielgröße:** `{target_name}`")
+st.sidebar.write(
+    f"**R² (Trainingseval):** {base_metrics.get('r2', float('nan')):.3f}  "
+    f"/ **MAE:** {base_metrics.get('mae', float('nan')):.4f}"
+)
+
+
+# ------------------------------------------------------------------
+# 2. CSV Upload & Vorbereitung
+# ------------------------------------------------------------------
+
+st.sidebar.subheader("Replay-Konfiguration")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Historische CSV-Datei wählen",
+    type=["csv"],
+    help="CSV in gleicher Feature-Struktur wie beim Modelltraining."
+)
+
+# Der Nutzer kann Ziel- und Zeitspalte anpassen
+target_col = st.sidebar.text_input(
+    "Zielspalte (Dicke, Ist-Wert)",
+    value=target_name,
+    help="Spaltenname mit der gemessenen Dicke im CSV."
+)
+
+time_col = st.sidebar.text_input(
+    "Zeitspalte (optional)",
+    value="timestamp",
+    help="Zeitstempel-Spalte, falls vorhanden (wird zur Sortierung und Anzeige genutzt)."
+)
+
+# Fenstergröße für den „abgespielten“ Ausschnitt
+window_size = st.sidebar.slider(
+    "Anzeigefenster (Anzahl Punkte im Verlauf)",
+    min_value=100,
+    max_value=5000,
+    value=1000,
+    step=100,
+    help="Wie viele Messpunkte sollen im Zeitverlauf gleichzeitig angezeigt werden?"
+)
+
+# ------------------------------------------------------------------
+# 2.1 Daten + Vorhersagen vorbereiten (gecached)
+# ------------------------------------------------------------------
+
+@st.cache_data(show_spinner="Bereite CSV und Modellvorhersagen vor...")
+def prepare_replay_data(file_bytes: bytes, target_col: str, time_col: str, feature_names: list):
+    # CSV einlesen
+    df_raw = pd.read_csv(io.BytesIO(file_bytes))
+
+    # Zeitspalte parsen & sortieren (falls vorhanden)
+    if time_col in df_raw.columns:
+        df_raw[time_col] = pd.to_datetime(df_raw[time_col], errors="coerce")
+        df_raw = df_raw.sort_values(time_col).reset_index(drop=True)
+    else:
+        # Falls keine Zeitspalte vorhanden, Index als „Zeit“ verwenden
+        df_raw = df_raw.reset_index(drop=True)
+        df_raw["__index_as_time__"] = df_raw.index
+
+    # Check: Zielspalte vorhanden?
+    if target_col not in df_raw.columns:
+        raise ValueError(
+            f"Zielspalte '{target_col}' nicht im CSV gefunden. "
+            f"Gefundene Spalten: {list(df_raw.columns)[:15]} ..."
+        )
+
+    # Check: Feature-Spalten
+    missing_features = [f for f in feature_names if f not in df_raw.columns]
+    if missing_features:
+        raise ValueError(
+            "Folgende Modell-Features fehlen im CSV (Feature-Engineering identisch?): "
+            + ", ".join(missing_features[:20])
+        )
+
+    # Feature-Matrix X und Ziel y aufbauen
+    X = df_raw[feature_names].copy()
+    y_true = df_raw[target_col].copy()
+
+    # Modellvorhersage
+    y_pred = model.predict(X)
+
+    # Ergebnis-DF für Replay
+    if time_col in df_raw.columns:
+        df_res = df_raw[[time_col]].copy()
+        df_res.rename(columns={time_col: "time"}, inplace=True)
+    else:
+        df_res = df_raw[["__index_as_time__"]].copy()
+        df_res.rename(columns={"__index_as_time__": "time"}, inplace=True)
+
+    df_res["y_true"] = y_true
+    df_res["y_pred"] = y_pred
+    df_res["error"] = df_res["y_true"] - df_res["y_pred"]
+
+    return df_res, X
+
+
+# ------------------------------------------------------------------
+# 3. Hauptlogik: nur wenn eine CSV geladen wurde
+# ------------------------------------------------------------------
+
+if uploaded_file is None:
+    st.info("Bitte links im Sidebar eine historische CSV-Datei auswählen, um den Replay-Modus zu starten.")
+    st.stop()
+
+try:
+    csv_bytes = uploaded_file.getvalue()
+    df_res, X_features = prepare_replay_data(csv_bytes, target_col, time_col, feature_names)
+except Exception as e:
+    st.error(f"Fehler bei der Vorbereitung der Daten: {e}")
+    st.stop()
+
+n_points = len(df_res)
+st.markdown(f"**Geladene Fahrt:** {n_points} Messpunkte")
+
+# ------------------------------------------------------------------
+# 4. Replay-„Position“ (Zeitachse)
+# ------------------------------------------------------------------
+
+st.sidebar.subheader("Replay-Steuerung")
+
+replay_index = st.sidebar.slider(
+    "Replay-Position",
+    min_value=0,
+    max_value=max(0, n_points - 1),
+    value=max(0, n_points - 1),
+    step=1,
+    help="Bewegt sich von Start der Fahrt (0) bis zum letzten Punkt."
+)
+
+start_idx = max(0, replay_index - window_size)
+df_window = df_res.iloc[start_idx:replay_index + 1].copy()
+df_until_now = df_res.iloc[:replay_index + 1].copy()
+
+st.caption(
+    f"Anzeigezeitraum von Punkt {start_idx} bis {replay_index} "
+    f"(von insgesamt {n_points} Messpunkten)."
+)
+
+
+# ------------------------------------------------------------------
+# 5. Kennzahlen bis zur aktuellen Replay-Position
+# ------------------------------------------------------------------
+
+col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
+
+mae_now = float(np.mean(np.abs(df_until_now["y_true"] - df_until_now["y_pred"])))
+rmse_now = float(np.sqrt(np.mean((df_until_now["y_true"] - df_until_now["y_pred"])**2)))
+# R²: nur sinnvoll, wenn Varianz vorhanden
+if np.var(df_until_now["y_true"]) > 0:
+    ss_res = np.sum((df_until_now["y_true"] - df_until_now["y_pred"])**2)
+    ss_tot = np.sum((df_until_now["y_true"] - df_until_now["y_true"].mean())**2)
+    r2_now = 1 - ss_res / ss_tot
+else:
+    r2_now = float("nan")
+
+col_kpi1.metric("MAE bis jetzt", f"{mae_now:.4f}")
+col_kpi2.metric("RMSE bis jetzt", f"{rmse_now:.4f}")
+col_kpi3.metric("R² bis jetzt", f"{r2_now:.3f}")
+
+
+# ------------------------------------------------------------------
+# 6. Plot 1: Zeitverlauf – echte vs. vorhergesagte Dicke
+# ------------------------------------------------------------------
+
+st.subheader("Zeitverlauf der Dicke – Ist vs. Modellvorhersage")
+
+fig_time = px.line(
+    df_window,
+    x="time",
+    y=["y_true", "y_pred"],
+    labels={"value": "Dicke", "time": "Zeit", "variable": "Kurve"},
+)
+
+fig_time.update_layout(
+    legend_title_text="",
+    margin=dict(l=10, r=10, t=40, b=10)
+)
+
+st.plotly_chart(fig_time, use_container_width=True)
+
+
+# ------------------------------------------------------------------
+# 7. Plot 2: Echte Werte vs. Vorhersage (Streudiagramm)
+# ------------------------------------------------------------------
+
+st.subheader("Streudiagramm – Echte Dicke vs. Vorhersage (bis aktuelle Position)")
+
+fig_scatter = px.scatter(
+    df_until_now,
+    x="y_true",
+    y="y_pred",
+    labels={"y_true": "Echte Dicke", "y_pred": "Vorhersage"},
+)
+
+# Linie x=y hinzufügen (perfekte Vorhersage)
+min_val = min(df_until_now["y_true"].min(), df_until_now["y_pred"].min())
+max_val = max(df_until_now["y_true"].max(), df_until_now["y_pred"].max())
+
+fig_scatter.add_shape(
+    type="line",
+    x0=min_val, y0=min_val,
+    x1=max_val, y1=max_val,
+    line=dict(dash="dash")
+)
+
+fig_scatter.update_layout(
+    margin=dict(l=10, r=10, t=40, b=10)
+)
+
+st.plotly_chart(fig_scatter, use_container_width=True)
+
+
+# ------------------------------------------------------------------
+# 8. Wichtigste Einflussgrößen (global + lokal)
+# ------------------------------------------------------------------
+
+st.subheader("Wichtigste Einflussgrößen der KI")
+
+col_fi, col_shap = st.columns(2)
+
+# 8.1 Globale Feature-Importance des Random Forests
+with col_fi:
+    st.markdown("**Globale Wichtigkeit (Feature Importance des Random Forest)**")
+
+    fi = pd.DataFrame({
+        "Feature": feature_names,
+        "Importance": model.feature_importances_
+    }).sort_values("Importance", ascending=False).head(15)
+
+    fig_fi = px.bar(
+        fi,
+        x="Importance",
+        y="Feature",
+        orientation="h",
+        labels={"Importance": "Wichtigkeit", "Feature": "Feature"}
+    )
+    fig_fi.update_layout(
+        margin=dict(l=10, r=10, t=40, b=10),
+        yaxis=dict(autorange="reversed")
+    )
+    st.plotly_chart(fig_fi, use_container_width=True)
+
+    st.caption(
+        "Diese Darstellung zeigt, welche Eingangsgrößen das Modell "
+        "insgesamt am stärksten für die Dickenvorhersage nutzt."
+    )
+
+# 8.2 Lokale Erklärung (SHAP) für den aktuell ausgewählten Zeitpunkt
+with col_shap:
+    st.markdown("**Lokale Erklärung (SHAP) für den aktuellen Zeitpunkt**")
+
+    @st.cache_resource(show_spinner="Initialisiere SHAP-Explainer...")
+    def get_explainer(model_):
+        return shap.TreeExplainer(model_)
+
+    explainer = get_explainer(model)
+    x_row = X_features.iloc[[replay_index]]  # eine Zeile als DataFrame
+
+    shap_values = explainer.shap_values(x_row)
+
+    # Für Regressionsmodell: shap_values ist ein Array (1, n_features)
+    if isinstance(shap_values, list):
+        shap_row = shap_values[0][0]
+    else:
+        shap_row = shap_values[0]
+
+    contrib = pd.Series(shap_row, index=feature_names)
+    contrib_abs_sorted = contrib.reindex(contrib.abs().sort_values(ascending=False).index)
+    contrib_top = contrib_abs_sorted.head(15)
+
+    contrib_df = pd.DataFrame({
+        "Feature": contrib_top.index,
+        "Beitrag": contrib_top.values
+    })
+
+    fig_shap = px.bar(
+        contrib_df,
+        x="Beitrag",
+        y="Feature",
+        orientation="h",
+        labels={"Beitrag": "SHAP-Beitrag", "Feature": "Feature"}
+    )
+    fig_shap.update_layout(
+        margin=dict(l=10, r=10, t=40, b=10),
+        yaxis=dict(autorange="reversed")
+    )
+
+    st.plotly_chart(fig_shap, use_container_width=True)
+
+    st.caption(
+        "Positive Werte bedeuten: dieses Feature treibt die Vorhersage **nach oben** "
+        "(größere Dicke). Negative Werte: treiben die Vorhersage **nach unten**. "
+        "Damit kannst du für den gewählten Zeitpunkt nachvollziehen, "
+        "warum die KI diesen Dickenwert vorgeschlagen hat."
+    )
+
+
+# ------------------------------------------------------------------
+# 9. Tabellarische Detailansicht des aktuellen Zeitpunktes
+# ------------------------------------------------------------------
+
+st.subheader("Details am aktuellen Replay-Zeitpunkt")
+
+current_true = df_res.iloc[replay_index]["y_true"]
+current_pred = df_res.iloc[replay_index]["y_pred"]
+current_err = df_res.iloc[replay_index]["error"]
+
+col_c1, col_c2, col_c3 = st.columns(3)
+col_c1.metric("Echte Dicke", f"{current_true:.4f}")
+col_c2.metric("Vorhersage", f"{current_pred:.4f}")
+col_c3.metric("Fehler (Echt - Modell)", f"{current_err:.4f}")
+
+with st.expander("Eingangsfeatures am aktuellen Zeitpunkt anzeigen"):
+    st.dataframe(X_features.iloc[[replay_index]].T, use_container_width=True)
