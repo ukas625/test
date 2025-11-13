@@ -376,16 +376,18 @@ with col_fi:
         "insgesamt am stärksten für die Dickenvorhersage nutzt."
     )
 
-# 8.2 Lokale Erklärung (SHAP) für den aktuell ausgewählten Zeitpunkt
 with col_shap:
     st.markdown("**Lokale Erklärung (SHAP) für den aktuellen Zeitpunkt**")
 
+    # Keine Argumente -> nichts Hash-Problemtisches mehr
     @st.cache_resource(show_spinner="Initialisiere SHAP-Explainer...")
-    def get_explainer(model_):
-        return shap.TreeExplainer(model_)
+    def get_explainer():
+        return shap.TreeExplainer(model)
 
-    explainer = get_explainer(model)
-    x_row = X_features.iloc[[replay_index]]  # eine Zeile als DataFrame
+    explainer = get_explainer()
+
+    # eine Zeile als DataFrame
+    x_row = X_features.iloc[[replay_index]]
 
     shap_values = explainer.shap_values(x_row)
 
@@ -424,7 +426,6 @@ with col_shap:
         "Damit kannst du für den gewählten Zeitpunkt nachvollziehen, "
         "warum die KI diesen Dickenwert vorgeschlagen hat."
     )
-
 
 # ------------------------------------------------------------------
 # 9. Tabellarische Detailansicht des aktuellen Zeitpunktes
