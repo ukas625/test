@@ -1,3 +1,41 @@
+# --- 4.3: SHAP Feature Importance --- 🧠
+
+import shap
+
+# 1) Sicherstellen, dass X dieselben Spalten wie beim Training hat
+X_train_aligned = X_train.reindex(columns=df_X.columns, fill_value=0)
+X_test_aligned  = X_test.reindex(columns=df_X.columns,  fill_value=0)
+
+# 2) TreeExplainer mit "interventional" Hintergrunddaten aufsetzen
+explainer_rf = shap.TreeExplainer(
+    model_rf,
+    data=X_train_aligned,                     # Hintergrunddaten (Training)
+    feature_perturbation="interventional"    # stabilere Variante
+)
+
+# 3) Stichprobe aus dem Test-Set wählen
+X_test_sample = X_test_aligned.sample(
+    n=min(1000, len(X_test_aligned)),
+    random_state=42
+)
+
+# 4) SHAP-Werte berechnen – Additivitäts-Check deaktivieren
+shap_values_rf = explainer_rf.shap_values(
+    X_test_sample,
+    check_additivity=False   # <- wichtiger Schalter!
+)
+
+# 5) Summary-Plot anzeigen
+shap.summary_plot(shap_values_rf, X_test_sample)
+
+
+
+
+
+
+
+
+
 import io
 from datetime import datetime
 
