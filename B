@@ -157,29 +157,69 @@ n_points = len(df_res)
 st.markdown(f"**Geladene Fahrt:** {n_points} Messpunkte")
 
 # ------------------------------------------------------------------
-# 4. Replay-„Position“ (Zeitachse)
+# 4. Replay-„Position“ (Zeitachse / Simulation des Live-Betriebs)
 # ------------------------------------------------------------------
 
 st.sidebar.subheader("Replay-Steuerung")
 
+# Replay-Index im Session-State halten (damit Buttons funktionieren)
+if "replay_index" not in st.session_state:
+    # Starte am Anfang der Fahrt
+    st.session_state.replay_index = 0
+
+# Fall A: Zu wenige Punkte -> kein Slider / keine Buttons nötig
 if n_points <= 1:
-    # Kein Slider möglich – wir nehmen einfach den einzigen Punkt
     st.sidebar.info(
-        "Die geladene Fahrt enthält nur "
-        f"{n_points} Messpunkt(e). Der Replay-Slider ist daher deaktiviert."
+        f"Die geladene Fahrt enthält nur {n_points} Messpunkt(e). "
+        "Der Replay-Slider ist daher deaktiviert."
     )
     replay_index = 0
+
+# Fall B: Normale Fahrt -> Simulation wie Live-Daten
 else:
+    # Batch-Größe auswählbar machen (z.B. 500 Zeilen)
+    batch_size = st.sidebar.selectbox(
+        "Batch-Größe für Simulation",
+        options=[1, 10, 100, 500, 1000],
+        index=3,  # Standard: 500
+        help="Wie viele Zeilen sollen pro Schritt neu 'ins System kommen'?"
+    )
+
+    # Steuer-Buttons (Reset, +1 Zeile, +Batch)
+    col_b1, col_b2, col_b3 = st.sidebar.columns(3)
+
+    if col_b1.button("⏮ Reset"):
+        st.session_state.replay_index = 0
+
+    if col_b2.button("➕ 1"):
+        st.session_state.replay_index = min(
+            st.session_state.replay_index + 1,
+            n_points - 1
+        )
+
+    if col_b3.button(f"+{batch_size}"):
+        st.session_state.replay_index = min(
+            st.session_state.replay_index + batch_size,
+            n_points - 1
+        )
+
+    # Optional: Slider zum direkten Springen an eine Stelle
     replay_index = st.sidebar.slider(
-        "Replay-Position",
+        "Direkt springen (Index)",
         min_value=0,
         max_value=n_points - 1,
-        value=n_points - 1,
+        value=st.session_state.replay_index,
         step=1,
         help="Bewegt sich von Start der Fahrt (0) bis zum letzten Punkt."
     )
 
+    # Slider-Wert wieder in den Session-State zurückschreiben
+    st.session_state.replay_index = replay_index
+
+# Ab hier arbeiten alle Plots & KPIs mit replay_index
+replay_index = st.session_state.replay_index
 start_idx = max(0, replay_index - window_size)
+
 df_window = df_res.iloc[start_idx:replay_index + 1].copy()
 df_until_now = df_res.iloc[:replay_index + 1].copy()
 
