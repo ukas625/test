@@ -449,6 +449,12 @@ with st.expander("Eingangsfeatures am aktuellen Zeitpunkt anzeigen"):
 
 
 
+
+
+
+
+
+
 import io
 import os
 import json
@@ -478,14 +484,14 @@ st.caption(
 MODEL_PATH = "rf_dashboard.joblib"
 LOG_PATH = "assist_log.csv"
 
+
 # ------------------------------------------------------------------
 # 1. Modell laden
 # ------------------------------------------------------------------
 
 @st.cache_resource(show_spinner="Lade Random-Forest-Modell...")
 def load_model_bundle(path: str):
-    bundle = joblib.load(path)
-    return bundle
+    return joblib.load(path)
 
 bundle = load_model_bundle(MODEL_PATH)
 model = bundle["model"]
@@ -502,11 +508,12 @@ st.sidebar.write(
     f"/ **MAE:** {base_metrics.get('mae', float('nan')):.4f}"
 )
 
+
 # ------------------------------------------------------------------
-# 2. Ziel-Dicke & Prozesszustand (CSV)
+# 2. Soll-Dicke & Prozesszustand-CSV
 # ------------------------------------------------------------------
 
-st.sidebar.subheader("Soll-Dicke & Prozesszustand")
+st.sidebar.subheader("Soll-Dicke")
 
 target_thickness = st.sidebar.number_input(
     "Soll-Dicke in mm",
@@ -515,30 +522,27 @@ target_thickness = st.sidebar.number_input(
     value=1.40,
     step=0.01,
     format="%.2f",
-    help="Zielwert, den das System durch Empfehlung der Maschinenparameter erreichen soll."
 )
 
+st.sidebar.subheader("Prozesszustand (CSV)")
+
 uploaded_file = st.sidebar.file_uploader(
-    "Prozesszustand-CSV laden",
+    "CSV mit aktuellem Prozesszustand",
     type=["csv"],
-    help="CSV mit aktuellen Prozessparametern (Spalten wie im Training). "
-         "Kann eine oder mehrere Zeilen enthalten."
+    help="Struktur wie beim Training (gleiche Features)."
 )
 
 time_col_guess = st.sidebar.text_input(
-    "Zeitspalte (optional, z.B. 'timestamp')",
+    "Zeitspalte (optional)",
     value="timestamp",
-    help="Nur für Anzeigezwecke – falls vorhanden, wird sie zur Auswahl des Messpunkts genutzt."
+    help="Nur für die Anzeige / Auswahl."
 )
 
 if uploaded_file is None:
     st.info("Bitte links im Sidebar eine CSV mit aktuellen Prozessparametern hochladen.")
     st.stop()
 
-# ------------------------------------------------------------------
-# 2.1 CSV einlesen & prüfen
-# ------------------------------------------------------------------
-
+# CSV einlesen
 try:
     df_proc = pd.read_csv(uploaded_file)
 except Exception as e:
@@ -548,8 +552,7 @@ except Exception as e:
 missing_features = [f for f in feature_names if f not in df_proc.columns]
 if missing_features:
     st.error(
-        "Folgende Modell-Features fehlen in der geladenen CSV. "
-        "Die Struktur muss der Trainingsbasis entsprechen:\n\n"
+        "Folgende Modell-Features fehlen in der CSV:\n\n"
         + ", ".join(missing_features[:40])
     )
     st.stop()
@@ -557,13 +560,14 @@ if missing_features:
 n_points = len(df_proc)
 st.markdown(f"**Geladene Prozesspunkte:** {n_points}")
 
-# Zeitspalte vorbereiten (nur für Anzeige/Selection)
+# Zeitspalte vorbereiten (nur für Auswahl)
 if time_col_guess in df_proc.columns:
     df_proc[time_col_guess] = pd.to_datetime(df_proc[time_col_guess], errors="coerce")
     has_time = True
 else:
     has_time = False
     df_proc["__idx_time__"] = df_proc.index
+
 
 # ------------------------------------------------------------------
 # 3. Messpunkt / Betriebszustand auswählen
@@ -573,10 +577,9 @@ st.sidebar.subheader("Messpunkt auswählen")
 
 if n_points == 1:
     row_index = 0
-    st.sidebar.info("CSV enthält nur einen Messpunkt – dieser wird als aktueller Zustand verwendet.")
+    st.sidebar.info("CSV enthält nur einen Messpunkt – dieser wird verwendet.")
 else:
     if has_time:
-        # Auswahl per Zeitstempel
         options = df_proc.index.tolist()
 
         def format_func(idx):
@@ -586,11 +589,10 @@ else:
         row_index = st.sidebar.selectbox(
             "Messpunkt",
             options=options,
-            index=len(options) - 1,  # Standard: letzter Punkt
+            index=len(options) - 1,
             format_func=format_func
         )
     else:
-        # Keine Zeitspalte -> Index-Slider
         row_index = st.sidebar.slider(
             "Messpunkt-Index",
             min_value=0,
@@ -600,30 +602,27 @@ else:
         )
 
 x_current = df_proc.loc[row_index, feature_names].copy()
-x_current_df = x_current.to_frame().T  # für Modellvorhersage
+x_current_df = x_current.to_frame().T
 y_measured = df_proc.loc[row_index, target_name] if target_name in df_proc.columns else np.nan
-
-# aktuelle Modellprognose
 y_pred_current = float(model.predict(x_current_df)[0])
 
+
 # ------------------------------------------------------------------
-# 4. Regelbare Maschinenparameter & physikalische Grenzen
+# 4. Regelbare Parameter & physikalische Grenzen (mit Fix)
 # ------------------------------------------------------------------
 
 st.sidebar.subheader("Regelbare Maschinenparameter")
 
-# Heuristik: Vorschlag für Temperatur/Druck/Geschwindigkeit
 suggested_controls = [
     f for f in feature_names
     if any(key in f.lower() for key in ["temp", "temperatur", "druck", "press", "speed", "geschw"])
 ]
 
 control_features = st.sidebar.multiselect(
-    "Regelbare Parameter auswählen",
+    "Regelbare Parameter",
     options=feature_names,
     default=suggested_controls,
-    help="Nur diese Größen werden vom System verändert. "
-         "Alle anderen Prozessgrößen werden auf dem aktuellen Wert gehalten."
+    help="Nur diese Größen werden vom System verändert."
 )
 
 if len(control_features) == 0:
@@ -632,8 +631,8 @@ if len(control_features) == 0:
 
 st.sidebar.markdown("**Physikalische Grenzen**")
 st.sidebar.caption(
-    "Standardmäßig werden Minimum und Maximum aus der geladenen CSV verwendet. "
-    "Diese können bei Bedarf angepasst werden."
+    "Standard = Minimum / Maximum aus der CSV. "
+    "Bei konstanten Spalten wird automatisch ein kleiner Bereich um den Wert gelegt."
 )
 
 param_bounds = {}
@@ -642,27 +641,39 @@ for cf in control_features:
     col_max = float(df_proc[cf].max())
     low, high = sorted([col_min, col_max])
 
+    # *** WICHTIGER FIX ***: wenn low == high (konstante Spalte),
+    # künstlich einen kleinen Bereich darum legen
+    if low == high:
+        span = max(1.0, abs(low) * 0.1)  # z.B. ±10 % oder mindestens ±1
+        min_slider = low - span
+        max_slider = low + span
+        default = (low - span / 2, low + span / 2)
+    else:
+        min_slider = low
+        max_slider = high
+        default = (low, high)
+
     bounds = st.sidebar.slider(
         cf,
-        min_value=float(low),
-        max_value=float(high),
-        value=(float(low), float(high)),
+        min_value=float(min_slider),
+        max_value=float(max_slider),
+        value=default,
         format="%.4f"
     )
     param_bounds[cf] = bounds
 
-# Anzahl der Kandidaten für die Suche
 n_candidates = st.sidebar.number_input(
-    "Anzahl Optimierungs-Kandidaten",
+    "Anzahl Kandidaten",
     min_value=50,
     max_value=2000,
     value=300,
     step=50,
-    help="Je mehr Kandidaten, desto genauer, aber desto langsamer."
+    help="Je mehr, desto genauer – aber langsamer."
 )
 
+
 # ------------------------------------------------------------------
-# 5. Optimierung: Empfehlungen berechnen
+# 5. Optimierung & Logging
 # ------------------------------------------------------------------
 
 def optimize_controls(base_row: pd.Series,
@@ -670,13 +681,8 @@ def optimize_controls(base_row: pd.Series,
                       param_bounds: dict,
                       target_value: float,
                       n_samples: int = 300):
-    """
-    Einfache zufällige Suche im Raum der regelbaren Parameter.
-    Andere Prozessgrößen bleiben auf dem aktuellen Wert.
-    """
     rng = np.random.default_rng(42)
 
-    # Start: aktueller Zustand (damit der immer im Vergleich ist)
     best_row = base_row.copy()
     best_pred = float(
         model.predict(best_row[feature_names].to_frame().T)[0]
@@ -703,21 +709,15 @@ def optimize_controls(base_row: pd.Series,
 
 
 def append_log(entry: dict):
-    """
-    Logging aller Empfehlungen zur späteren Nachvollziehbarkeit.
-    Die Parameter werden als JSON-Strings abgelegt.
-    """
     df_log = pd.DataFrame([entry])
     file_exists = os.path.exists(LOG_PATH)
-
     if file_exists:
         df_log.to_csv(LOG_PATH, mode="a", header=False, index=False)
     else:
         df_log.to_csv(LOG_PATH, mode="w", header=True, index=False)
 
 
-# Button für Berechnung
-calculate = st.button("Empfehlung berechnen")
+calculate = st.sidebar.button("Empfehlung berechnen")
 
 assist_result = None
 
@@ -730,7 +730,6 @@ if calculate:
         n_samples=int(n_candidates)
     )
 
-    # Ergebnisse für Anzeige merken
     assist_result = {
         "best_row": best_row,
         "best_pred": best_pred,
@@ -738,7 +737,6 @@ if calculate:
     }
     st.session_state["assist_result"] = assist_result
 
-    # Logging vorbereiten
     controls_current = {cf: float(x_current[cf]) for cf in control_features}
     controls_recommended = {cf: float(best_row[cf]) for cf in control_features}
 
@@ -755,46 +753,48 @@ if calculate:
     }
 
     append_log(log_entry)
-    st.success(f"Empfehlung berechnet und im Log (`{LOG_PATH}`) protokolliert.")
+    st.sidebar.success(f"Empfehlung berechnet und in `{LOG_PATH}` protokolliert.")
 
-# Falls schon vorher einmal berechnet wurde, letzten Stand aus Session anzeigen
 if assist_result is None and "assist_result" in st.session_state:
     assist_result = st.session_state["assist_result"]
 
+
 # ------------------------------------------------------------------
-# 6. Anzeige: aktueller Zustand vs. Empfehlung
+# 6. Kompaktes Layout: alles Relevante auf einen Blick
 # ------------------------------------------------------------------
 
-st.subheader("Aktueller Zustand am ausgewählten Messpunkt")
+st.subheader("Aktueller Zustand & Soll-Dicke")
 
-col_a1, col_a2, col_a3 = st.columns(3)
+col_top1, col_top2, col_top3 = st.columns(3)
 
-col_a1.metric("Ist-Dicke (Messwert)", f"{y_measured:.4f}" if not np.isnan(y_measured) else "n/a")
-col_a2.metric("Modellprognose (aktuell)", f"{y_pred_current:.4f}")
-col_a3.metric("Abweichung zur Soll-Dicke",
-              f"{(y_pred_current - target_thickness):+.4f}")
+col_top1.metric(
+    "Ist-Dicke (Messwert)",
+    f"{y_measured:.4f}" if not np.isnan(y_measured) else "n/a"
+)
+col_top2.metric("Modellprognose (aktuell)", f"{y_pred_current:.4f}")
+col_top3.metric("Soll-Dicke", f"{target_thickness:.4f}")
 
-with st.expander("Eingangsgrößen am aktuellen Messpunkt anzeigen"):
+with st.expander("Alle Eingangsgrößen am aktuellen Messpunkt"):
     st.dataframe(x_current_df.T, use_container_width=True)
 
 st.markdown("---")
-
-st.subheader("Modellbasierte Empfehlung für Maschinenparameter")
+st.subheader("Empfehlung der KI für Maschinenparameter")
 
 if assist_result is None:
-    st.info("Noch keine Empfehlung berechnet. Bitte oben auf **„Empfehlung berechnen“** klicken.")
+    st.info("Noch keine Empfehlung berechnet. Bitte links im Sidebar auf **„Empfehlung berechnen“** klicken.")
 else:
     best_row = assist_result["best_row"]
     best_pred = assist_result["best_pred"]
     best_error = assist_result["best_error"]
 
-    # Kennzahlen der Empfehlung
-    col_b1, col_b2, col_b3 = st.columns(3)
-    col_b1.metric("Prognose mit Empfehlung", f"{best_pred:.4f}")
-    col_b2.metric("Differenz zur Soll-Dicke", f"{(best_pred - target_thickness):+.4f}")
-    col_b3.metric("Verbesserung (|Fehler|)", f"{abs(y_pred_current - target_thickness) - best_error:+.4f}")
+    current_error = abs(y_pred_current - target_thickness)
 
-    # Vergleichstabelle nur für regelbare Parameter
+    col_mid1, col_mid2, col_mid3 = st.columns(3)
+    col_mid1.metric("Prognose mit Empfehlung", f"{best_pred:.4f}")
+    col_mid2.metric("Abweichung zur Soll-Dicke", f"{(best_pred - target_thickness):+.4f}")
+    col_mid3.metric("Verbesserung |Fehler|", f"{current_error - best_error:+.4f}")
+
+    # Vergleich nur für regelbare Parameter
     df_cmp = pd.DataFrame({
         "Parameter": control_features,
         "Aktuell": [float(x_current[cf]) for cf in control_features],
@@ -802,26 +802,26 @@ else:
     })
     df_cmp["Delta"] = df_cmp["Empfehlung"] - df_cmp["Aktuell"]
 
-    st.markdown("**Vergleich der regelbaren Maschinenparameter**")
-    st.dataframe(df_cmp, use_container_width=True)
+    col_bottom_left, col_bottom_right = st.columns([1, 1])
 
-    # Balkendiagramm der Anpassungen
-    fig_delta = px.bar(
-        df_cmp,
-        x="Parameter",
-        y="Delta",
-        labels={"Delta": "Empfohlene Änderung", "Parameter": "Parameter"},
-    )
-    fig_delta.update_layout(margin=dict(l=10, r=10, t=40, b=10))
-    st.plotly_chart(fig_delta, use_container_width=True)
+    with col_bottom_left:
+        st.markdown("**Regelbare Parameter – Tabelle**")
+        st.dataframe(df_cmp, use_container_width=True, height=250)
 
-    st.caption(
-        "Positive Werte bedeuten: der Parameter soll **erhöht**, negative Werte: **verringert** werden. "
-        "Die empfohlenen Werte respektieren die oben definierten physikalischen Grenzen."
-    )
+    with col_bottom_right:
+        st.markdown("**Empfohlene Änderungen (Δ)**")
+        fig_delta = px.bar(
+            df_cmp,
+            x="Parameter",
+            y="Delta",
+            labels={"Delta": "Empfohlene Änderung", "Parameter": "Parameter"},
+        )
+        fig_delta.update_layout(margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig_delta, use_container_width=True)
 
     with st.expander("Vollständiger empfohlener Eingangsvektor (alle Features)"):
         st.dataframe(best_row[feature_names].to_frame().T, use_container_width=True)
+
 
 # ------------------------------------------------------------------
 # 7. Hinweis zu Transparenz & Logging
@@ -829,11 +829,9 @@ else:
 
 st.markdown("---")
 st.markdown(
-    "🔎 **Transparenz & Logging:**\n"
-    f"Jede Berechnung (Soll-Dicke, ausgewählter Messpunkt, aktuelle Prognose, "
-    f"empfohlene Parameter, neue Prognose) wird automatisch in der Datei "
-    f"`{LOG_PATH}` protokolliert. Dadurch sind Entscheidungen des Modells "
-    "nachvollziehbar und können im Sinne des EU AI Act geprüft werden. "
-    "Der Maschinenführer behält die letzte Entscheidungshoheit – das System "
-    "gibt lediglich Empfehlungen und greift nicht selbstständig in die Steuerung ein."
+    "🔎 **Transparenz & Logging:** Jede Berechnung (Soll-Dicke, ausgewählter Messpunkt, "
+    "aktuelle Prognose, empfohlene Parameter, neue Prognose) wird automatisch in "
+    f"`{LOG_PATH}` protokolliert. So bleiben die Modellentscheidungen nachvollziehbar "
+    "und können im Sinne des EU AI Act geprüft werden. Die letzte Entscheidung liegt "
+    "immer beim Maschinenführer – das System gibt nur Empfehlungen."
 )
