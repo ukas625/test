@@ -2,30 +2,40 @@ import joblib
 from sklearn.tree import export_graphviz
 import graphviz
 
-# Modell laden
-rf = joblib.load("rf_dashboard.joblib")
+# Modell oder Dict laden
+obj = joblib.load("rf_dashboard.joblib")
 
-# Einen Beispiel-Baum auswählen (z. B. den ersten)
+# Falls ein Dict geladen wurde → Modell extrahieren
+if isinstance(obj, dict):
+    # Versuche häufige Schlüssel
+    for key in ["model", "rf", "random_forest", "randomforest", "estimator"]:
+        if key in obj:
+            rf = obj[key]
+            break
+    else:
+        raise KeyError("Konnte keinen Random Forest im geladenen Dict finden!")
+else:
+    rf = obj  # es ist direkt ein Modell
+
+# Beispiel-Baum auswählen
 tree = rf.estimators_[0]
 
-# Falls du Feature-Namen hast (z.B. aus DataFrame):
-# feature_names = X.columns.tolist()
-# Falls nicht: Dummy-Namen erzeugen
-feature_names = [f"Feature_{i}" for i in range(rf.n_features_in_)]
+# Feature-Namen bestimmen
+if hasattr(rf, "feature_names_in_"):
+    feature_names = rf.feature_names_in_
+else:
+    feature_names = [f"Feature_{i}" for i in range(rf.n_features_in_)]
 
-# Baum in DOT-Format exportieren
+# Baum nur anzeigen, nicht speichern
 dot_data = export_graphviz(
     tree,
     out_file=None,
     feature_names=feature_names,
     filled=True,
-    rounded=True,
-    special_characters=True
+    rounded=True
 )
 
-# Visualisieren
-graph = graphviz.Source(dot_data)
-graph
+graphviz.Source(dot_data)
 
 
 
