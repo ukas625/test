@@ -1,41 +1,42 @@
 import joblib
-from sklearn.tree import export_graphviz
-import graphviz
+from sklearn.tree import plot_tree
+import matplotlib.pyplot as plt
 
-# Modell oder Dict laden
+# === Modell laden ===
 obj = joblib.load("rf_dashboard.joblib")
 
-# Falls ein Dict geladen wurde → Modell extrahieren
+# Falls das gespeicherte Objekt ein Dictionary ist
 if isinstance(obj, dict):
-    # Versuche häufige Schlüssel
-    for key in ["model", "rf", "random_forest", "randomforest", "estimator"]:
+    # Modell aus häufigen Keys extrahieren
+    for key in ["model", "rf", "random_forest", "estimator"]:
         if key in obj:
             rf = obj[key]
             break
-    else:
-        raise KeyError("Konnte keinen Random Forest im geladenen Dict finden!")
 else:
-    rf = obj  # es ist direkt ein Modell
+    rf = obj
 
-# Beispiel-Baum auswählen
-tree = rf.estimators_[0]
+# === Einen Beispielbaum auswählen ===
+tree = rf.estimators_[0]   # erster Baum
 
-# Feature-Namen bestimmen
+# === Feature-Namen laden oder Dummy-Namen erzeugen ===
 if hasattr(rf, "feature_names_in_"):
     feature_names = rf.feature_names_in_
 else:
     feature_names = [f"Feature_{i}" for i in range(rf.n_features_in_)]
 
-# Baum nur anzeigen, nicht speichern
-dot_data = export_graphviz(
+# === Baum visualisieren ===
+plt.figure(figsize=(22, 12))
+
+# max_depth begrenzt die Darstellung, damit es nicht zu groß wird
+plot_tree(
     tree,
-    out_file=None,
     feature_names=feature_names,
     filled=True,
-    rounded=True
+    max_depth=3        # <<< Du kannst auch 4 oder 5 probieren
 )
 
-graphviz.Source(dot_data)
+plt.title("Beispielbaum aus dem Random Forest (max_depth=3)")
+plt.show()
 
 
 
