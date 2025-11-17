@@ -1,32 +1,35 @@
-# --- 4.3: SHAP Feature Importance --- 🧠
+import joblib
+from sklearn.tree import export_graphviz
+import graphviz
 
-import shap
+# Modell laden
+rf = joblib.load("rf_dashboard.joblib")
 
-# 1) Sicherstellen, dass X dieselben Spalten wie beim Training hat
-X_train_aligned = X_train.reindex(columns=df_X.columns, fill_value=0)
-X_test_aligned  = X_test.reindex(columns=df_X.columns,  fill_value=0)
+# Einen Beispiel-Baum auswählen (z. B. den ersten)
+tree = rf.estimators_[0]
 
-# 2) TreeExplainer mit "interventional" Hintergrunddaten aufsetzen
-explainer_rf = shap.TreeExplainer(
-    model_rf,
-    data=X_train_aligned,                     # Hintergrunddaten (Training)
-    feature_perturbation="interventional"    # stabilere Variante
+# Falls du Feature-Namen hast (z.B. aus DataFrame):
+# feature_names = X.columns.tolist()
+# Falls nicht: Dummy-Namen erzeugen
+feature_names = [f"Feature_{i}" for i in range(rf.n_features_in_)]
+
+# Baum in DOT-Format exportieren
+dot_data = export_graphviz(
+    tree,
+    out_file=None,
+    feature_names=feature_names,
+    filled=True,
+    rounded=True,
+    special_characters=True
 )
 
-# 3) Stichprobe aus dem Test-Set wählen
-X_test_sample = X_test_aligned.sample(
-    n=min(1000, len(X_test_aligned)),
-    random_state=42
-)
+# Visualisieren
+graph = graphviz.Source(dot_data)
+graph
 
-# 4) SHAP-Werte berechnen – Additivitäts-Check deaktivieren
-shap_values_rf = explainer_rf.shap_values(
-    X_test_sample,
-    check_additivity=False   # <- wichtiger Schalter!
-)
 
-# 5) Summary-Plot anzeigen
-shap.summary_plot(shap_values_rf, X_test_sample)
+
+
 
 
 
